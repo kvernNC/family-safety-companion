@@ -10,6 +10,19 @@ Family Safety (sites autorisés, applications, temps d'écran).
 > conditions d'utilisation de Microsoft, l'API peut changer sans préavis, et ton compte familial est exposé.
 > À utiliser en connaissance de cause.
 
+## Aperçu
+
+La console : une carte par protection, avec sa description et son interrupteur. Une protection levée se réactive
+d'elle-même après le délai choisi.
+
+![Console principale : protections locales avec interrupteurs](docs/console.png)
+
+La fenêtre Family Safety, onglet Sites web : réglages du filtre, ajout de sites en masse, tentatives bloquées.
+
+![Fenêtre Family Safety : ajout de sites en masse](docs/family-safety.png)
+
+*Captures réalisées avec des données fictives.*
+
 ## Fonctions
 
 ### Protections locales (25, réversibles)
@@ -75,6 +88,8 @@ Tout est rangé dans `C:\ProgramData\ControleParental` : copie installée du scr
 journaux, `secrets\` (jeton chiffré, réservé à SYSTEM et aux administrateurs).
 
 ## Crédits et licence
+- Conçu par [kvernNC](https://github.com/kvernNC) et développé avec
+  [Claude](https://www.anthropic.com/claude) (Anthropic), via Claude Code : code, interface, analyse de l'API et tests.
 - Méthode d'authentification et points d'accès de l'API mobile repris de
   [pyfamilysafety](https://github.com/pantherale0/pyfamilysafety) (MIT, © 2023 Jordan H) ; la notice figure
   dans `FamilySafety.psm1`.
