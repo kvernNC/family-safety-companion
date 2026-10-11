@@ -1,0 +1,4 @@
+# Garder les scripts tels quels (UTF-8 avec BOM, fins de ligne Windows)
+*.ps1  text eol=crlf
+*.psm1 text eol=crlf
+*.txt  text eol=crlf

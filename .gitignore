@@ -1,0 +1,7 @@
+# Données locales et sensibles : ne jamais publier
+secrets/
+api-samples/
+Backups/
+*.log
+sites-envoyes-*.json
+*.bin

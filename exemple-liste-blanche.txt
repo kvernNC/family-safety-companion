@@ -1,0 +1,73 @@
+﻿! ============================================================================
+! Exemple de liste blanche pour un enfant de 11 ans (collège, francophone) — à relire et adapter avant envoi.
+! Format : un site par ligne. Les lignes « ! » ou « # » sont des commentaires :
+! retire le « # » devant une ligne pour l'activer.
+! Chargement : console > Family Safety (cloud) > Sites web > Ajout en masse >
+! « Charger un fichier... » > Analyser > Envoyer (mode « Autoriser »).
+! ============================================================================
+
+! ---------------------------------------------------- jeunesse
+bayam.tv
+motoufo.fr
+qwantjunior.com
+tice.nc
+youtubekids.com
+
+! ---------------------------------------------------- recherche et encyclopédies pour enfants
+vikidia.org
+fr.vikidia.org
+wikimini.org
+1jour1actu.com
+jde.fr
+# fr.wikipedia.org          (encyclopédie adulte : contenus non filtrés, à ton choix)
+
+! ---------------------------------------------------- dictionnaires, conjugaison, orthographe
+larousse.fr
+le-dictionnaire.com
+leconjugueur.lefigaro.fr
+cnrtl.fr
+bescherelle.com
+wordreference.com
+
+! ---------------------------------------------------- cours et exercices (niveau collège)
+lumni.fr
+kartable.fr
+schoolmouv.fr
+fr.khanacademy.org
+khanacademy.org
+sesamath.net
+mathenpoche.sesamath.net
+labomep.sesamath.net
+geogebra.org
+logicieleducatif.fr
+jeuxpedago.com
+cned.fr
+pix.fr
+app.pix.fr
+
+! ---------------------------------------------------- langues
+duolingo.com
+
+! ---------------------------------------------------- programmation et création
+scratch.mit.edu
+code.org
+studio.code.org
+
+! ---------------------------------------------------- sciences, culture
+cite-sciences.fr
+mnhn.fr
+louvre.fr
+
+! ---------------------------------------------------- Nouvelle-Calédonie
+ac-noumea.nc
+meteo.nc
+gouv.nc
+
+! ---------------------------------------------------- à compléter : école et outils scolaires
+! Ajoute ici l'adresse exacte de l'ENT ou de Pronote de son établissement
+! (elle figure dans les identifiants donnés par l'école), par exemple :
+# xxxxxxx.index-education.net
+# office.com                (Word, PowerPoint en ligne pour les devoirs)
+
+! ---------------------------------------------------- jeux (à ton choix)
+# lichess.org               (échecs ; désactiver le chat dans les préférences du compte)
