@@ -35,9 +35,9 @@ La fenêtre Family Safety, onglet Sites web : réglages du filtre, ajout de site
   localisation désactivés, maintenance hebdomadaire (fichiers temporaires, `winget upgrade`).
 - **Groupes du compte enfant** : autorisations précises sans droits administrateur, choisies dans une liste fermée
   et sans risque (compteur FPS des jeux, compteurs de performance). Voir plus bas.
-- **Démarrage élevé** : menu pour lancer un programme à l'ouverture de session de l'enfant — app UWP (ex. Armoury
-  Crate SE) dans sa session, ou `.exe` en SYSTEM — et remplacer l'accueil Xbox par ce programme (FSE) ; (re)démarrage
-  d'un service en LocalSystem (voir plus bas).
+- **Démarrage élevé** : menu pour lancer un programme à l'ouverture de session de l'enfant (app UWP ou `.exe` dans
+  sa session, ou `.exe` en SYSTEM) et **remplacer l'accueil Xbox (FSE) par ce qu'on veut** : Armoury Crate SE,
+  Steam Big Picture, Playnite… ; (re)démarrage d'un service en LocalSystem (voir plus bas).
 - Réactivation automatique après un délai quand tu lèves une protection (tâche planifiée SYSTEM),
   sauvegarde du registre avant chaque modification, diagnostic (comptes, navigateurs ou VPN en trop, démarrage).
 
@@ -91,10 +91,13 @@ Lance un programme à chaque ouverture de session de l'enfant et peut lui faire 
 l'UAC) ; chaque cible est **figée dans une tâche planifiée** que l'enfant ne peut ni voir ni modifier. Il déclenche
 l'ouverture de session, mais ne choisit jamais ce qui est lancé.
 
-### Deux types de cible
+### Trois types de cible
 - **App Windows / UWP** (ex. **Armoury Crate SE**) : une app UWP ne peut pas tourner en SYSTEM ; elle est donc
   lancée **dans la session de l'enfant, en tant que l'enfant**, par son AUMID (`PFN!AppId`, ou un nom partiel résolu).
-- **Programme `.exe`** (Win32, ex. **Winhanced**) : lancé **en SYSTEM dans la session interactive** de l'enfant
+- **Programme `.exe` en session enfant** (ex. **Steam Big Picture**, **Playnite**) : lancé normalement, sous le
+  compte de l'enfant. C'est le bon choix pour un launcher, qui a besoin du profil de l'enfant (compte Steam,
+  bibliothèque, Family View) ; lancé en SYSTEM, il ne les verrait pas.
+- **Programme `.exe` en SYSTEM** (ex. **Winhanced**) : lancé **en SYSTEM dans la session interactive** de l'enfant
   (jeton SYSTEM injecté, comme `PsExec -s -i`), pour un outil qui a réellement besoin des droits machine.
 
 ### Remplacer l'accueil Xbox (FSE)
@@ -104,10 +107,17 @@ la garde** : tant que la cible tourne, si l'accueil Xbox réapparaît, il est re
 l'accueil plein écran, sans course au démarrage et **sans jamais montrer le bureau Windows**. En option, la cible
 est relancée si elle disparaît (« processus à surveiller »).
 
-### Exemple ROG Ally (Armoury Crate à la place de l'accueil Xbox)
-Onglet **Programmes** : Type = *App UWP*, cible = `B9ECED6F.ArmouryCrateSE_qmba6cd70vzyy!App` (AUMID relevé sur
-un ROG Ally RC71L, Armoury Crate SE 2.2.17 ; `ArmouryCrateSE` comme nom partiel fonctionne aussi), « tuer après » =
-`XboxPcApp,XboxPcAppFT`, « processus à surveiller » = `ArmouryCrateSE`. Enregistre, puis « Tester maintenant ».
+### Choisir ce qui remplace l'accueil Xbox
+Deux préréglages remplissent le formulaire ; vérifie, puis Enregistrer et « Tester maintenant » :
+
+| Préréglage | Type | Cible | Processus à surveiller |
+|---|---|---|---|
+| Armoury Crate SE | App UWP | `ArmouryCrateSE` (AUMID sur ROG Ally RC71L : `B9ECED6F.ArmouryCrateSE_qmba6cd70vzyy!App`) | `ArmouryCrateSE` |
+| Steam Big Picture | `.exe` en session enfant | `steam.exe` (trouvé dans le registre), arguments `-gamepadui` | `steam` |
+
+Pour un autre launcher (Playnite en plein écran, par exemple), choisis « `.exe` en session enfant », indique son
+exécutable et ses arguments, et garde « tuer après » sur `XboxPcApp,XboxPcAppFT`. Avec Steam, active **Family
+View** (PIN, jeux autorisés) pour limiter Isaac aux jeux choisis.
 
 Journal : `C:\ProgramData\ControleParental\elevate-launch.log` ; le diagnostic affiche les entrées configurées et
 l'état des services ASUS.
