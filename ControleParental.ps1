@@ -189,7 +189,7 @@ $script:ElevConfig     = Join-Path $script:AppDir 'elevate-entries.json'
 $script:ElevScriptPath = Join-Path $script:AppDir 'Elevate-Launch.ps1'
 # Script exécuté par la tâche. Deux cas :
 #  - cible .exe (Win32), tâche SYSTEM : lance l'exe EN SYSTEM dans la session interactive (jeton SYSTEM injecté,
-#    même principe que PsExec -s -i) — pour un outil qui a besoin des droits machine (Winhance, etc.) ;
+#    même principe que PsExec -s -i) — pour un outil qui a besoin des droits machine (Winhanced, etc.) ;
 #  - cible UWP (Armoury Crate SE...), tâche exécutée EN TANT QUE L'UTILISATEUR qui ouvre la session : une app UWP ne
 #    peut pas tourner en SYSTEM, on la lance donc par son AUMID dans la session de l'enfant.
 # Dans les deux cas, option « tuer l'accueil Xbox après le lancement puis monter la garde » pour le remplacer en FSE.
@@ -1033,7 +1033,7 @@ $script:ElevXaml = @'
             <TextBlock Text="Type de cible :" Margin="0,8,0,2"/>
             <ComboBox x:Name="ElevType" SelectedIndex="0">
               <ComboBoxItem Content="App Windows / UWP (Armoury Crate SE) — lancée en session enfant"/>
-              <ComboBoxItem Content="Programme .exe (Winhance, Win32) — lancé en SYSTEM"/>
+              <ComboBoxItem Content="Programme .exe (Winhanced, Win32) — lancé en SYSTEM"/>
             </ComboBox>
             <TextBlock x:Name="ElevTargetLabel" Text="Nom de l'app UWP ou AUMID (PFN!AppId) :" Margin="0,8,0,2" TextWrapping="Wrap"/>
             <StackPanel Orientation="Horizontal">
@@ -1043,7 +1043,7 @@ $script:ElevXaml = @'
             <TextBlock x:Name="ElevArgsLabel" Text="Arguments (.exe seulement, facultatif) :" Margin="0,8,0,2"/>
             <TextBox x:Name="ElevArgs"/>
             <TextBlock Text="Remplacer l'accueil Xbox : processus à tuer après le lancement (virgules) :" Margin="0,8,0,2" TextWrapping="Wrap"/>
-            <TextBox x:Name="ElevKillAfter" Text="XboxPcApp,XboxApp,GamingApp"/>
+            <TextBox x:Name="ElevKillAfter" Text="XboxPcApp,XboxPcAppFT"/>
             <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
               <TextBlock Text="Délai avant de tuer (s) : " VerticalAlignment="Center"/>
               <TextBox x:Name="ElevDelay" Width="50" Text="6" Margin="0,0,16,0"/>
@@ -1052,14 +1052,14 @@ $script:ElevXaml = @'
             </StackPanel>
             <TextBlock Text="Processus à tuer AVANT (facultatif) :" Margin="0,8,0,2"/>
             <TextBox x:Name="ElevKill"/>
-            <TextBlock TextWrapping="Wrap" Foreground="#666666" FontSize="11" Margin="0,6,0,0" Text="Armoury Crate (mode Xbox) : type UWP, nom « ArmouryCrate » (ou son AUMID), laisse « tuer après » sur les processus d'accueil Xbox. Vérifie les noms exacts dans le Gestionnaire des tâches. La puissance se règle à part, via l'onglet Services."/>
+            <TextBlock TextWrapping="Wrap" Foreground="#666666" FontSize="11" Margin="0,6,0,0" Text="ROG Ally : type UWP, cible B9ECED6F.ArmouryCrateSE_qmba6cd70vzyy!App (ou ArmouryCrateSE), « tuer après » = XboxPcApp,XboxPcAppFT, processus à surveiller = ArmouryCrateSE. Vérifie les noms dans le Gestionnaire des tâches : ils varient selon les versions."/>
             <Button x:Name="BtnElevSave" Content="Enregistrer (crée/remplace la tâche)" Padding="12,5" FontWeight="SemiBold" Margin="0,12,0,0" HorizontalAlignment="Left"/>
           </StackPanel>
         </Grid>
       </TabItem>
       <TabItem Header="Services">
         <StackPanel Margin="12">
-          <TextBlock TextWrapping="Wrap" Text="Passe un service au compte LocalSystem (droits maximaux) + démarrage automatique, puis le redémarre. Utile si un service (Armoury Crate, ASUS) est arrêté ou tourne avec trop peu de droits."/>
+          <TextBlock TextWrapping="Wrap" Text="Passe un service au compte LocalSystem (droits maximaux) + démarrage automatique, puis le redémarre. Utile si un service est arrêté ou mal configuré. Sur ROG Ally, les services ASUS et Armoury tournent déjà en LocalSystem : inutile pour la puissance."/>
           <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
             <TextBlock Text="Service : " VerticalAlignment="Center"/>
             <ComboBox x:Name="SvcList" Width="360" IsEditable="True" Margin="0,0,8,0"/>

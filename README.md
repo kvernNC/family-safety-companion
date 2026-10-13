@@ -36,8 +36,8 @@ La fenêtre Family Safety, onglet Sites web : réglages du filtre, ajout de site
 - **Groupes du compte enfant** : autorisations précises sans droits administrateur, choisies dans une liste fermée
   et sans risque (compteur FPS des jeux, compteurs de performance). Voir plus bas.
 - **Démarrage élevé** : menu pour lancer un programme à l'ouverture de session de l'enfant — app UWP (ex. Armoury
-  Crate SE) dans sa session, ou `.exe` en SYSTEM — remplacer l'accueil Xbox par ce programme (FSE), et (re)démarrer
-  un service en l'élevant au compte LocalSystem (voir plus bas).
+  Crate SE) dans sa session, ou `.exe` en SYSTEM — et remplacer l'accueil Xbox par ce programme (FSE) ; (re)démarrage
+  d'un service en LocalSystem (voir plus bas).
 - Réactivation automatique après un délai quand tu lèves une protection (tâche planifiée SYSTEM),
   sauvegarde du registre avant chaque modification, diagnostic (comptes, navigateurs ou VPN en trop, démarrage).
 
@@ -86,52 +86,57 @@ Le script demande l'élévation (UAC). En ligne de commande (administrateur) :
 ```
 
 ## Démarrage élevé — menu « Démarrage élevé »
-Sur un compte standard, certaines applications n'ont pas les droits d'agir sur le matériel, et l'accueil Xbox
-plein écran (Full Screen Experience) revient toujours. Donner à l'enfant un accès administrateur réglerait le
-symptôme mais annulerait Family Safety et toutes les protections. Ce menu fait le travail sans lui donner de
-droits : **c'est toi, admin, qui choisis les cibles** dans la console (protégée par l'UAC) ; chaque cible est
-**figée dans une tâche planifiée** que l'enfant ne peut ni voir ni modifier. Il déclenche l'ouverture de session,
-mais ne choisit jamais ce qui est lancé.
+Lance un programme à chaque ouverture de session de l'enfant et peut lui faire **remplacer l'accueil Xbox plein
+écran** (Full Screen Experience). **C'est toi, admin, qui choisis les cibles** dans la console (protégée par
+l'UAC) ; chaque cible est **figée dans une tâche planifiée** que l'enfant ne peut ni voir ni modifier. Il déclenche
+l'ouverture de session, mais ne choisit jamais ce qui est lancé.
 
 ### Deux types de cible
 - **App Windows / UWP** (ex. **Armoury Crate SE**) : une app UWP ne peut pas tourner en SYSTEM ; elle est donc
-  lancée **dans la session de l'enfant, en tant que l'enfant** (par son AUMID `PFN!AppId`, résolu depuis son nom).
-- **Programme `.exe`** (Win32, ex. **Winhance**) : lancé **en SYSTEM dans la session interactive** de l'enfant
-  (jeton SYSTEM injecté, comme `PsExec -s -i`), pour un outil qui a besoin des droits machine.
+  lancée **dans la session de l'enfant, en tant que l'enfant**, par son AUMID (`PFN!AppId`, ou un nom partiel résolu).
+- **Programme `.exe`** (Win32, ex. **Winhanced**) : lancé **en SYSTEM dans la session interactive** de l'enfant
+  (jeton SYSTEM injecté, comme `PsExec -s -i`), pour un outil qui a réellement besoin des droits machine.
 
 ### Remplacer l'accueil Xbox (FSE)
-Pour chaque cible tu peux renseigner « processus à tuer après le lancement » (par défaut `XboxPcApp,XboxApp,GamingApp`).
-La tâche attend quelques secondes que ta cible soit affichée, **tue l'accueil Xbox**, puis **monte la garde** :
-tant que la cible tourne, si l'accueil Xbox réapparaît, il est retué. Résultat : ta cible prend la place de
-l'accueil plein écran, sans course au démarrage et **sans jamais montrer le bureau Windows**. C'est une version
-robuste du « script qui tue Xbox » : garde continue, journal, et relance de la cible si elle disparaît (option).
+Renseigne « processus à tuer après le lancement » (par défaut `XboxPcApp,XboxPcAppFT`, relevés sur ROG Ally sous
+Windows 11 25H2). La tâche attend quelques secondes que ta cible soit affichée, **tue l'accueil Xbox**, puis **monte
+la garde** : tant que la cible tourne, si l'accueil Xbox réapparaît, il est retué. Ta cible prend la place de
+l'accueil plein écran, sans course au démarrage et **sans jamais montrer le bureau Windows**. En option, la cible
+est relancée si elle disparaît (« processus à surveiller »).
 
-### La puissance (ROG Ally) passe par le service, pas par le front-end
-Armoury Crate SE étant une app UWP (non élevable), lancer le front-end ne suffit pas à régler le TDP sur un compte
-standard : c'est le **service** d'Armoury Crate (compte SYSTEM) qui applique la puissance. Utilise l'onglet
-**Services** pour passer le service d'Armoury Crate (ou de Winhance) en **LocalSystem + démarrage automatique** et
-le redémarrer. La liste propose les services ASUS / Armoury détectés.
+### Exemple ROG Ally (Armoury Crate à la place de l'accueil Xbox)
+Onglet **Programmes** : Type = *App UWP*, cible = `B9ECED6F.ArmouryCrateSE_qmba6cd70vzyy!App` (AUMID relevé sur
+un ROG Ally RC71L, Armoury Crate SE 2.2.17 ; `ArmouryCrateSE` comme nom partiel fonctionne aussi), « tuer après » =
+`XboxPcApp,XboxPcAppFT`, « processus à surveiller » = `ArmouryCrateSE`. Enregistre, puis « Tester maintenant ».
 
-### Exemple ROG Ally (remplacer l'accueil Xbox par Armoury Crate)
-1. Onglet **Programmes** : Type = *App UWP*, nom de l'app = `ArmouryCrate` (ou son AUMID), « tuer après » =
-   `XboxPcApp,XboxApp,GamingApp`, « processus à surveiller » = `ArmouryCrate` ; Enregistrer, puis « Tester
-   maintenant ».
-2. Onglet **Services** : élève + redémarre le service d'Armoury Crate pour que la puissance tienne.
-
-Journal : `C:\ProgramData\ControleParental\elevate-launch.log` ; le diagnostic affiche aussi les entrées
-configurées et l'état des services ASUS.
+Journal : `C:\ProgramData\ControleParental\elevate-launch.log` ; le diagnostic affiche les entrées configurées et
+l'état des services ASUS.
 
 ```powershell
-.\ControleParental.ps1 -ElevList                         # liste les cibles configurées
-.\ControleParental.ps1 -ElevTest "ArmouryCrate"          # lance maintenant l'entrée nommée ainsi
-.\ControleParental.ps1 -SvcElevate ArmouryCrateService   # élève + redémarre un service
+.\ControleParental.ps1 -ElevList                           # liste les cibles configurées
+.\ControleParental.ps1 -ElevTest ArmouryCrateSE            # lance maintenant l'entrée nommée ainsi
+.\ControleParental.ps1 -SvcElevate ArmouryCrateSEService   # LocalSystem + démarrage auto + redémarrage
 ```
 
-> ⚠️ Lancer un `.exe` en SYSTEM lui donne les droits maximaux de la machine ; n'ajoute que des programmes de
-> confiance. Ce menu ne crée aucun champ où l'enfant fournirait lui-même une cible : il ne peut pas s'en servir
-> pour lancer ou élever autre chose. Vérifie les noms de processus exacts dans le Gestionnaire des tâches de ton
-> appareil (ils varient selon les versions de Windows et d'Armoury Crate).
+L'onglet **Services** passe un service en LocalSystem, démarrage automatique, puis le redémarre. Utile pour un
+service arrêté ou mal configuré ; sur ROG Ally, les services ASUS et Armoury tournent déjà en LocalSystem.
 
+> ⚠️ Lancer un `.exe` en SYSTEM lui donne les droits maximaux de la machine ; n'ajoute que des programmes de
+> confiance. Ce menu ne crée aucun champ où l'enfant fournirait lui-même une cible. Vérifie les noms de processus
+> dans le Gestionnaire des tâches de ton appareil : ils varient selon les versions de Windows et d'Armoury Crate.
+
+## ROG Ally : ce que nous avons appris
+Analyse du journal `C:\ProgramData\ASUS\ARMOURY CRATE Service\ArmouryCrate.Service_<date>.log` (Armoury Crate SE
+2.2.17, octobre 2026) :
+
+- **La puissance n'est pas un problème de droits.** Depuis un compte standard, les changements de mode arrivent au
+  service ASUS (compte SYSTEM), qui les applique : le firmware répond `SetThermalPolicy, Result=1`.
+- **Le retour au mode maximal vient d'Armoury Crate lui-même.** Il garde un mode « sur secteur » et un mode « sur
+  batterie ». Sa logique de profils par application (`DoSetAppProfile`, `HandleOtherPluginRequest` dans le
+  journal) se déclenche quand l'application au premier plan change, par exemple sur un Alt+Tab en jeu. Elle range
+  alors ton choix dans le mode « secteur » et remet le mode « batterie » au maximum. Sur batterie, le maximum gagne.
+  À régler dans Armoury Crate : profils par jeu, ou mode sur batterie.
+- **Compteur FPS absent sur le compte enfant** : voir « Groupes du compte enfant » ci-dessous.
 ## Groupes du compte enfant — bouton « Groupes du compte enfant »
 Certaines fonctions des jeux demandent une autorisation Windows qu'un compte standard n'a pas, sans pour autant
 justifier des droits administrateur. Exemple : sur ROG Ally, Armoury Crate n'affiche pas les FPS sur le compte
