@@ -33,6 +33,9 @@ La fenêtre Family Safety, onglet Sites web : réglages du filtre, ajout de site
 - **Windows** : SmartScreen en mode « Bloquer », widgets et suggestions web désactivés ; en option : applications du
   Store uniquement, stockage USB désactivé, élévation refusée aux comptes standard, historique d'activités et
   localisation désactivés, maintenance hebdomadaire (fichiers temporaires, `winget upgrade`).
+- **Optimisation (optionnel)** : désactiver Copilot et l'IA de Windows, alléger la télémétrie et les pubs **sans
+  casser Family Safety**, Game DVR, apps en arrière-plan, indexation Search, démarrage de SCSKiller, et un mode jeu
+  Defender (exclusions des dossiers de jeux, sans désactiver l'antivirus). Voir plus bas.
 - **Groupes du compte enfant** : autorisations précises sans droits administrateur, choisies dans une liste fermée
   et sans risque (compteur FPS des jeux, compteurs de performance). Voir plus bas.
 - **Démarrage élevé** : menu pour lancer un programme à l'ouverture de session de l'enfant (app UWP ou `.exe` dans
@@ -61,6 +64,7 @@ La fenêtre Family Safety, onglet Sites web : réglages du filtre, ajout de site
 | Blocage d'applications, blocage d'appareil, limites de temps d'écran | Non testé en réel (gestion du fuseau horaire non confirmée) |
 | Protections locales | Code vérifié, pas encore éprouvé sur un PC d'enfant : teste chacune avant de t'y fier |
 | Groupes du compte enfant | Lecture des comptes et des groupes vérifiée sur ROG Ally ; effet sur le compteur FPS à confirmer |
+| Optimisation de l'OS (optionnel) | Catalogue vérifié sur ROG Ally (33 réglages chargés) ; teste chaque interrupteur avant de t'y fier |
 | Démarrage élevé (UWP ou SYSTEM), remplacement de l'accueil Xbox, élévation de service | Non testé sur un appareil réel : vérifie `elevate-launch.log` et l'écran de l'enfant |
 
 ## Prérequis
@@ -147,6 +151,28 @@ Analyse du journal `C:\ProgramData\ASUS\ARMOURY CRATE Service\ArmouryCrate.Servi
   alors ton choix dans le mode « secteur » et remet le mode « batterie » au maximum. Sur batterie, le maximum gagne.
   À régler dans Armoury Crate : profils par jeu, ou mode sur batterie.
 - **Compteur FPS absent sur le compte enfant** : voir « Groupes du compte enfant » ci-dessous.
+## Optimisation de l'OS (optionnel) — catégorie « Optimisation (optionnel) »
+Réglages d'allègement inspirés de [Chris Titus Tech WinUtil](https://github.com/ChrisTitusTech/winutil), mais
+adaptés à un ROG Ally sous contrôle parental, en interrupteurs réversibles (hors « Tout activer »).
+
+| Interrupteur | Effet |
+|---|---|
+| Désactiver Copilot et l'IA de Windows | Coupe Copilot, Recall et « Click to Do » (stratégies). Sans effet sur les jeux. |
+| Télémétrie allégée (sûre) + pubs et suggestions | ID de publicité, « expériences personnalisées », fonctionnalités grand public, Spotlight, suggestions du menu Démarrer. |
+| Edge : pas d'exécution en arrière-plan | Edge ne tourne plus en fond et ne précharge plus au démarrage. |
+| Désactiver l'enregistrement en arrière-plan (Game DVR) | Coupe la capture continue en **gardant** l'overlay Game Bar et les FPS. |
+| Empêcher les apps de tourner en arrière-plan | Apps du Store en fond coupées (batterie/RAM) ; les jeux Steam ne sont pas concernés. |
+| Désactiver l'indexation Windows Search | Arrête le service d'indexation ; la recherche d'apps dans Démarrer marche toujours. |
+| Ne pas lancer SCSKiller au démarrage | Désactive son lancement auto via le mécanisme natif de Windows (réversible). |
+| Defender : accélérer les jeux (sans le désactiver) | Exclut les dossiers de jeux Steam, limite l'analyse au repos/à 20% CPU, coupe l'envoi d'échantillons. **La protection temps réel reste active.** |
+
+**Garde-fous (jamais touchés) :** `DiagTrack` et `CDPSvc`, le niveau de télémétrie (pas forcé à 0), Game Bar, et
+le plan d'alimentation Windows (géré par Armoury Crate). C'est la différence avec un durcissement « adulte » qui
+casserait les rapports d'activité de Family Safety.
+
+**Antivirus :** le choix fait ici est de **garder Defender actif** et de viser la perf par les exclusions de jeux,
+plutôt que de couper l'antivirus d'un appareil d'enfant connecté à Internet.
+
 ## Groupes du compte enfant — bouton « Groupes du compte enfant »
 Certaines fonctions des jeux demandent une autorisation Windows qu'un compte standard n'a pas, sans pour autant
 justifier des droits administrateur. Exemple : sur ROG Ally, Armoury Crate n'affiche pas les FPS sur le compte

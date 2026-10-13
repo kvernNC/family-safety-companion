@@ -616,6 +616,57 @@ function Get-DiagnosticReport {
     $r
 }
 
+# ====================================================================== appui aux optimisations
+# Active/désactive un élément de démarrage (clé Run) via le mécanisme natif StartupApproved de Windows (comme le
+# Gestionnaire des tâches), sur le compte courant. Réversible, sans perdre la commande d'origine.
+$script:StartupApprovedRun = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'
+function Set-StartupApproved([string]$Name, [bool]$Enabled) {
+    if (-not (Test-Path $script:StartupApprovedRun)) { New-Item -Path $script:StartupApprovedRun -Force | Out-Null }
+    $blob = if ($Enabled) { [byte[]](2,0,0,0,0,0,0,0,0,0,0,0) } else { [byte[]](3,0,0,0,0,0,0,0,0,0,0,0) }
+    New-ItemProperty -Path $script:StartupApprovedRun -Name $Name -Value $blob -PropertyType Binary -Force | Out-Null
+}
+function Test-StartupDisabled([string]$Name) {
+    $v = (Get-ItemProperty -Path $script:StartupApprovedRun -Name $Name -ErrorAction SilentlyContinue).$Name
+    [bool]($v -and $v.Count -ge 1 -and $v[0] -ne 2)
+}
+
+# Dossiers de jeux Steam (toutes les bibliothèques), pour les exclusions Defender.
+function Get-SteamGamePaths {
+    $steam = $null
+    foreach ($k in 'HKLM:\SOFTWARE\WOW6432Node\Valve\Steam', 'HKLM:\SOFTWARE\Valve\Steam') {
+        $p = (Get-ItemProperty $k -Name InstallPath -ErrorAction SilentlyContinue).InstallPath
+        if ($p) { $steam = $p; break }
+    }
+    if (-not $steam) { return @() }
+    $paths = @(Join-Path $steam 'steamapps\common')
+    $vdf = Join-Path $steam 'steamapps\libraryfolders.vdf'
+    if (Test-Path $vdf) {
+        foreach ($line in (Get-Content $vdf -ErrorAction SilentlyContinue)) {
+            if ($line -match '"path"\s*"(.+?)"') { $paths += (Join-Path ($matches[1] -replace '\\\\', '\') 'steamapps\common') }
+        }
+    }
+    @($paths | Select-Object -Unique | Where-Object { Test-Path $_ })
+}
+# Defender « mode jeu » : exclusions des dossiers de jeux + analyse au repos/plafonnée + pas d'envoi d'échantillons.
+# NE désactive JAMAIS la protection en temps réel.
+function Set-DefenderGamePerf([bool]$On) {
+    $paths = Get-SteamGamePaths
+    if ($On) {
+        foreach ($p in $paths) { try { Add-MpPreference -ExclusionPath $p -ErrorAction Stop } catch {} }
+        try { Set-MpPreference -ScanAvgCPULoadFactor 20 -ScanOnlyIfIdleEnabled $true -SubmitSamplesConsent 2 -ErrorAction Stop } catch {}
+    } else {
+        foreach ($p in $paths) { try { Remove-MpPreference -ExclusionPath $p -ErrorAction Stop } catch {} }
+        try { Set-MpPreference -ScanAvgCPULoadFactor 50 -ScanOnlyIfIdleEnabled $true -SubmitSamplesConsent 1 -ErrorAction Stop } catch {}
+    }
+}
+function Test-DefenderGamePerf {
+    $paths = Get-SteamGamePaths
+    if ($paths.Count -eq 0) { return $false }
+    try { $ex = @((Get-MpPreference -ErrorAction Stop).ExclusionPath) } catch { return $false }
+    foreach ($p in $paths) { if ($ex -notcontains $p) { return $false } }
+    $true
+}
+
 # ====================================================================== catalogue des protections
 # Rec = recommandée (incluse dans « Tout activer »). Reg = valeurs de registre ; Lists = éléments ajoutés
 # à une liste de stratégies Edge (fusionnés, jamais écrasés) ; Apply/Undo/Test = logique spécifique.
@@ -758,7 +809,54 @@ $script:Tweaks = @(
        Desc = "Chaque dimanche à 08:00, lance « winget upgrade --all » sous le compte SYSTEM pour garder les applications à jour. winget sous SYSTEM est parfois capricieux : consulte maintenance.log les premières semaines. Ne remplace pas Windows Update."
        Apply = { Register-MaintTask 'ControleParental-Maint-Winget' 'Maint-Winget.ps1' $script:MaintWingetScript '08:00' }
        Undo  = { Get-ScheduledTask -TaskName 'ControleParental-Maint-Winget' -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false }
-       Test  = { [bool](Get-CpTask 'ControleParental-Maint-Winget') } }
+       Test  = { [bool](Get-CpTask 'ControleParental-Maint-Winget') } },
+
+    # ---------------------------------------------------------------- Optimisation OS (inspiré de CTT, adapté ROG Ally)
+    # Règle d'or : on ne coupe JAMAIS DiagTrack/CDPSvc ni la télémétrie à 0 (rapports Family Safety), ni Game Bar
+    # (overlay/FPS), ni le plan d'alimentation (géré par Armoury Crate).
+    @{ Id = 'opt-ai'; Cat = 'Optimisation (optionnel)'; Rec = $false; Name = "Désactiver Copilot et l'IA de Windows"
+       Desc = "Coupe Windows Copilot, Recall (capture d'écran mémoire) et « Click to Do » par stratégie. Inutile pour un enfant ; Recall est aussi un risque de vie privée. Sans effet sur les jeux."
+       Reg = @(@{ P = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot'; N = 'TurnOffWindowsCopilot'; V = 1 },
+               @{ P = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI'; N = 'DisableAIDataAnalysis'; V = 1 },
+               @{ P = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI'; N = 'DisableClickToDo'; V = 1 }) },
+
+    @{ Id = 'opt-privacy'; Cat = 'Optimisation (optionnel)'; Rec = $false; Name = 'Télémétrie allégée (sûre) + pubs et suggestions'
+       Desc = "Coupe l'ID de publicité, les « expériences personnalisées », les fonctionnalités grand public (installations d'apps promues), le contenu Spotlight et les suggestions du menu Démarrer / écran verrouillé. NE touche PAS à DiagTrack/CDPSvc ni au niveau de télémétrie : les rapports Family Safety continuent de fonctionner."
+       Reg = @(@{ P = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent'; N = 'DisableWindowsConsumerFeatures'; V = 1 },
+               @{ P = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent'; N = 'DisableTailoredExperiencesWithDiagnosticData'; V = 1 },
+               @{ P = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent'; N = 'DisableSoftLanding'; V = 1 },
+               @{ P = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent'; N = 'DisableWindowsSpotlightFeatures'; V = 1 },
+               @{ P = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo'; N = 'DisabledByGroupPolicy'; V = 1 }) },
+
+    @{ Id = 'opt-edge-bg'; Cat = 'Optimisation (optionnel)'; Rec = $false; Name = "Edge : pas d'exécution en arrière-plan"
+       Desc = "Edge ne tourne plus en tâche de fond et ne précharge plus au démarrage (RAM et batterie). Il se lance normalement quand on l'ouvre."
+       Reg = @(@{ P = $E; N = 'BackgroundModeEnabled'; V = 0 }, @{ P = $E; N = 'StartupBoostEnabled'; V = 0 }) },
+
+    @{ Id = 'opt-gamedvr'; Cat = 'Optimisation (optionnel)'; Rec = $false; Name = "Désactiver l'enregistrement en arrière-plan (Game DVR)"
+       Desc = "Coupe la capture vidéo continue du jeu tout en GARDANT l'overlay Game Bar et l'affichage des FPS. Gain CPU/GPU en jeu."
+       Reg = @(@{ P = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR'; N = 'AllowGameDVR'; V = 0 }) },
+
+    @{ Id = 'opt-bgapps'; Cat = 'Optimisation (optionnel)'; Rec = $false; Name = 'Empêcher les apps de tourner en arrière-plan'
+       Desc = "Les applications du Store ne s'exécutent plus en tâche de fond : batterie et mémoire. Les jeux Steam (Win32) ne sont pas concernés."
+       Reg = @(@{ P = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy'; N = 'LetAppsRunInBackground'; V = 2 }) },
+
+    @{ Id = 'opt-search'; Cat = 'Optimisation (optionnel)'; Rec = $false; Name = "Désactiver l'indexation Windows Search"
+       Desc = "Arrête le service d'indexation (gain CPU/disque). La recherche d'applications dans le menu Démarrer fonctionne toujours ; la recherche de fichiers devient plus lente. Adapté à un appareil « console »."
+       Apply = { Set-Service WSearch -StartupType Disabled -ErrorAction SilentlyContinue; Stop-Service WSearch -Force -ErrorAction SilentlyContinue }
+       Undo  = { Set-Service WSearch -StartupType Manual -ErrorAction SilentlyContinue; Start-Service WSearch -ErrorAction SilentlyContinue }
+       Test  = { (Get-Service WSearch -ErrorAction SilentlyContinue).StartType -eq 'Disabled' } },
+
+    @{ Id = 'opt-scskiller'; Cat = 'Optimisation (optionnel)'; Rec = $false; Name = 'Ne pas lancer SCSKiller au démarrage'
+       Desc = "SCSKiller (optimiseur de génération de shaders) n'a pas besoin de démarrer avec Windows. Désactive son lancement automatique via le mécanisme natif de Windows (réactivable). N'agit que sur ton compte."
+       Apply = { Set-StartupApproved 'SCSKiller' $false }
+       Undo  = { Set-StartupApproved 'SCSKiller' $true }
+       Test  = { Test-StartupDisabled 'SCSKiller' } },
+
+    @{ Id = 'opt-defender-perf'; Cat = 'Optimisation (optionnel)'; Rec = $false; Name = 'Defender : accélérer les jeux (sans le désactiver)'
+       Desc = "GARDE Defender et sa protection en temps réel ACTIFS. Ajoute les dossiers de jeux Steam en exclusion d'analyse, limite l'analyse au repos et à 20% du CPU, et coupe l'envoi automatique d'échantillons. Gain en jeu sans laisser l'appareil sans antivirus."
+       Apply = { Set-DefenderGamePerf $true }
+       Undo  = { Set-DefenderGamePerf $false }
+       Test  = { Test-DefenderGamePerf } }
 )
 $script:ById = @{}
 foreach ($t in $script:Tweaks) { $script:ById[$t.Id] = $t }
