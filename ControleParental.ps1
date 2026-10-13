@@ -653,63 +653,6 @@ function Enable-RunEntry([string]$Name) {
 # Désactivé par nous = plus aucune valeur Run vivante ET une sauvegarde présente (sinon : absent d'origine/désinstallé).
 function Test-RunDisabled([string]$Name) { (@(Get-RunEntries $Name).Count -eq 0) -and (Test-Path (Get-RunBackupPath $Name)) }
 
-# Dossiers de jeux Steam (toutes les bibliothèques), pour les exclusions Defender.
-function Get-SteamGamePaths {
-    $steam = $null
-    foreach ($k in 'HKLM:\SOFTWARE\WOW6432Node\Valve\Steam', 'HKLM:\SOFTWARE\Valve\Steam') {
-        $p = (Get-ItemProperty $k -Name InstallPath -ErrorAction SilentlyContinue).InstallPath
-        if ($p) { $steam = $p; break }
-    }
-    if (-not $steam) { return @() }
-    $paths = @(Join-Path $steam 'steamapps\common')
-    $vdf = Join-Path $steam 'steamapps\libraryfolders.vdf'
-    if (Test-Path $vdf) {
-        foreach ($line in (Get-Content $vdf -ErrorAction SilentlyContinue)) {
-            if ($line -match '"path"\s*"(.+?)"') { $paths += (Join-Path ($matches[1] -replace '\\\\', '\') 'steamapps\common') }
-        }
-    }
-    @($paths | Select-Object -Unique | Where-Object { Test-Path $_ })
-}
-# Defender « mode jeu » : exclusions des dossiers de jeux + analyse au repos/plafonnée + pas d'envoi d'échantillons.
-# NE désactive JAMAIS la protection en temps réel. L'état d'origine des réglages d'analyse est sauvegardé une fois,
-# pour une restauration fidèle (pas de valeurs par défaut imposées).
-$script:DefenderBackup = Join-Path $script:AppDir 'defender-gameperf.json'
-function Set-DefenderGamePerf([bool]$On) {
-    $paths = Get-SteamGamePaths
-    if ($On) {
-        if (-not (Test-Path $script:DefenderBackup)) {
-            try {
-                $mp = Get-MpPreference -ErrorAction Stop
-                Install-Self
-                [pscustomobject]@{ ScanAvgCPULoadFactor = $mp.ScanAvgCPULoadFactor; ScanOnlyIfIdleEnabled = [bool]$mp.ScanOnlyIfIdleEnabled; SubmitSamplesConsent = $mp.SubmitSamplesConsent } |
-                    ConvertTo-Json | Set-Content -Path $script:DefenderBackup -Encoding UTF8
-            } catch {}
-        }
-        foreach ($p in $paths) { try { Add-MpPreference -ExclusionPath $p -ErrorAction Stop } catch {} }
-        try { Set-MpPreference -ScanAvgCPULoadFactor 20 -ScanOnlyIfIdleEnabled $true -SubmitSamplesConsent 2 -ErrorAction Stop } catch {}
-    } else {
-        foreach ($p in $paths) { try { Remove-MpPreference -ExclusionPath $p -ErrorAction Stop } catch {} }
-        $o = $null
-        if (Test-Path $script:DefenderBackup) { try { $o = Get-Content $script:DefenderBackup -Raw -Encoding UTF8 | ConvertFrom-Json } catch {} }
-        try {
-            if ($o) { Set-MpPreference -ScanAvgCPULoadFactor ([int]$o.ScanAvgCPULoadFactor) -ScanOnlyIfIdleEnabled ([bool]$o.ScanOnlyIfIdleEnabled) -SubmitSamplesConsent ([int]$o.SubmitSamplesConsent) -ErrorAction Stop }
-            else    { Set-MpPreference -ScanAvgCPULoadFactor 50 -SubmitSamplesConsent 1 -ErrorAction Stop }   # repli : défauts Windows, sans toucher ScanOnlyIfIdle
-        } catch {}
-        Remove-Item $script:DefenderBackup -Force -ErrorAction SilentlyContinue
-    }
-}
-# « Appliqué » se lit sur la signature des réglages d'analyse (vrai même sans Steam) + les exclusions présentes si Steam existe.
-function Test-DefenderGamePerf {
-    try { $mp = Get-MpPreference -ErrorAction Stop } catch { return $false }
-    if ($mp.ScanAvgCPULoadFactor -ne 20 -or $mp.SubmitSamplesConsent -ne 2) { return $false }
-    $paths = Get-SteamGamePaths
-    if ($paths.Count -gt 0) {
-        $ex = @($mp.ExclusionPath)
-        foreach ($p in $paths) { if ($ex -notcontains $p) { return $false } }
-    }
-    $true
-}
-
 # ====================================================================== catalogue des protections
 # Rec = recommandée (incluse dans « Tout activer »). Reg = valeurs de registre ; Lists = éléments ajoutés
 # à une liste de stratégies Edge (fusionnés, jamais écrasés) ; Apply/Undo/Test = logique spécifique.
@@ -893,13 +836,7 @@ $script:Tweaks = @(
        Desc = "SCSKiller (optimiseur de génération de shaders) n'a pas besoin de démarrer avec Windows. Retire sa valeur de démarrage des clés Run (machine et ton compte) ; la commande d'origine est sauvegardée et restaurée si tu désactives. N'agit pas sur la session d'un autre utilisateur."
        Apply = { Disable-RunEntry 'SCSKiller' }
        Undo  = { Enable-RunEntry 'SCSKiller' }
-       Test  = { Test-RunDisabled 'SCSKiller' } },
-
-    @{ Id = 'opt-defender-perf'; Cat = 'Optimisation (optionnel)'; Rec = $false; NoReapply = $true; Name = 'Defender : accélérer les jeux (sans le désactiver)'
-       Desc = "GARDE Defender et sa protection en temps réel ACTIFS. Ajoute les dossiers de jeux Steam en exclusion d'analyse, limite l'analyse au repos et à 20% du CPU, et coupe l'envoi automatique d'échantillons. Gain en jeu sans laisser l'appareil sans antivirus."
-       Apply = { Set-DefenderGamePerf $true }
-       Undo  = { Set-DefenderGamePerf $false }
-       Test  = { Test-DefenderGamePerf } }
+       Test  = { Test-RunDisabled 'SCSKiller' } }
 )
 $script:ById = @{}
 foreach ($t in $script:Tweaks) { $script:ById[$t.Id] = $t }

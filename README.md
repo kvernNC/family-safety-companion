@@ -34,8 +34,7 @@ La fenêtre Family Safety, onglet Sites web : réglages du filtre, ajout de site
   Store uniquement, stockage USB désactivé, élévation refusée aux comptes standard, historique d'activités et
   localisation désactivés, maintenance hebdomadaire (fichiers temporaires, `winget upgrade`).
 - **Optimisation (optionnel)** : désactiver Copilot et l'IA de Windows, alléger la télémétrie et les pubs **sans
-  casser Family Safety**, Game DVR, apps en arrière-plan, indexation Search, démarrage de SCSKiller, et un mode jeu
-  Defender (exclusions des dossiers de jeux, sans désactiver l'antivirus). Voir plus bas.
+  casser Family Safety**, Game DVR, apps en arrière-plan, indexation Search, démarrage de SCSKiller. Voir plus bas.
 - **Groupes du compte enfant** : autorisations précises sans droits administrateur, choisies dans une liste fermée
   et sans risque (compteur FPS des jeux, compteurs de performance). Voir plus bas.
 - **Démarrage élevé** : menu pour lancer un programme à l'ouverture de session de l'enfant (app UWP ou `.exe` dans
@@ -64,7 +63,7 @@ La fenêtre Family Safety, onglet Sites web : réglages du filtre, ajout de site
 | Blocage d'applications, blocage d'appareil, limites de temps d'écran | Non testé en réel (gestion du fuseau horaire non confirmée) |
 | Protections locales | Code vérifié, pas encore éprouvé sur un PC d'enfant : teste chacune avant de t'y fier |
 | Groupes du compte enfant | Lecture des comptes et des groupes vérifiée sur ROG Ally ; effet sur le compteur FPS à confirmer |
-| Optimisation de l'OS (optionnel) | Catalogue vérifié sur ROG Ally (33 réglages chargés) ; teste chaque interrupteur avant de t'y fier |
+| Optimisation de l'OS (optionnel) | Catalogue vérifié sur ROG Ally (32 réglages chargés) ; teste chaque interrupteur avant de t'y fier |
 | Démarrage élevé (UWP ou SYSTEM), remplacement de l'accueil Xbox, élévation de service | Non testé sur un appareil réel : vérifie `elevate-launch.log` et l'écran de l'enfant |
 
 ## Prérequis
@@ -163,15 +162,16 @@ adaptés à un ROG Ally sous contrôle parental, en interrupteurs réversibles (
 | Désactiver l'enregistrement en arrière-plan (Game DVR) | Coupe la capture continue en **gardant** l'overlay Game Bar et les FPS. |
 | Empêcher les apps de tourner en arrière-plan | Apps du Store en fond coupées (batterie/RAM) ; les jeux Steam ne sont pas concernés. |
 | Désactiver l'indexation Windows Search | Arrête le service d'indexation ; la recherche d'apps dans Démarrer marche toujours. |
-| Ne pas lancer SCSKiller au démarrage | Désactive son lancement auto via le mécanisme natif de Windows (réversible). |
-| Defender : accélérer les jeux (sans le désactiver) | Exclut les dossiers de jeux Steam, limite l'analyse au repos/à 20% CPU, coupe l'envoi d'échantillons. **La protection temps réel reste active.** |
+| Ne pas lancer SCSKiller au démarrage | Retire sa valeur de démarrage des clés Run (machine + ton compte), sauvegardée pour restauration. |
 
 **Garde-fous (jamais touchés) :** `DiagTrack` et `CDPSvc`, le niveau de télémétrie (pas forcé à 0), Game Bar, et
 le plan d'alimentation Windows (géré par Armoury Crate). C'est la différence avec un durcissement « adulte » qui
 casserait les rapports d'activité de Family Safety.
 
-**Antivirus :** le choix fait ici est de **garder Defender actif** et de viser la perf par les exclusions de jeux,
-plutôt que de couper l'antivirus d'un appareil d'enfant connecté à Internet.
+**Antivirus :** l'outil **ne touche pas à Windows Defender**. Un script qui modifie Defender (exclusions,
+`Set-MpPreference`…) est lui-même détecté par Defender comme `Trojan:PowerShell/Killav` et tout le script est
+bloqué par AMSI. Si tu veux exclure tes dossiers de jeux Steam pour gagner en perf, fais-le à la main dans
+**Sécurité Windows → Protection contre les virus → Exclusions**, en gardant la protection active.
 
 ## Groupes du compte enfant — bouton « Groupes du compte enfant »
 Certaines fonctions des jeux demandent une autorisation Windows qu'un compte standard n'a pas, sans pour autant
