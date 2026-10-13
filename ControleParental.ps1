@@ -34,11 +34,14 @@ param(
     [string]$FsImport,
     [string]$FsChild,
     [switch]$FsBlock,
+    [switch]$ElevList,
+    [string]$ElevTest,
+    [string]$SvcElevate,
     [switch]$Quiet
 )
 
 $ErrorActionPreference = 'Stop'
-$script:CliMode = [bool]($Apply -or $Revert -or $Status -or $Diagnostic -or $FsRun -or $FsProbe -or $FsImport)
+$script:CliMode = [bool]($Apply -or $Revert -or $Status -or $Diagnostic -or $FsRun -or $FsProbe -or $FsImport -or $ElevList -or $ElevTest -or $SvcElevate)
 
 # ====================================================================== élévation
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -172,6 +175,176 @@ if (-not $w) { ('{0:s} winget introuvable' -f (Get-Date)) | Add-Content -Path $l
 & $w.FullName upgrade --all --silent --disable-interactivity --accept-source-agreements --accept-package-agreements *>> $log
 '@
 
+# Démarrage élevé (menu « Démarrage élevé » de la console) : lancer un programme choisi EN SYSTEM, dans la session
+# interactive de l'enfant, à chaque ouverture de session ; et (re)démarrer un service en l'élevant au compte
+# LocalSystem. Utile quand une application (Armoury Crate sur ROG Ally, par exemple) ne peut pas gérer le matériel
+# faute de droits sur un compte standard. C'EST L'ADMIN QUI CHOISIT LA CIBLE depuis la console (elle-même protégée
+# par l'UAC) : chaque cible est figée dans sa tâche planifiée. L'enfant déclenche l'ouverture de session mais ne
+# choisit jamais ce qui est élevé, et ne peut ni créer ni modifier ces tâches (compte standard).
+$script:ElevPrefix     = 'ControleParental-Elevate-'
+$script:ElevConfig     = Join-Path $script:AppDir 'elevate-entries.json'
+$script:ElevScriptPath = Join-Path $script:AppDir 'Elevate-Launch.ps1'
+# Script exécuté par la tâche (compte SYSTEM) : il lance la cible dans la session interactive active, avec le jeton
+# SYSTEM injecté dans cette session (même principe que PsExec -s -i). Peut d'abord tuer une instance non élevée.
+$script:ElevScript = @'
+param(
+    [Parameter(Mandatory = $true)][string]$Target,
+    [string]$Arguments = '',
+    [string]$Kill = '',        # noms de processus à tuer avant de relancer, séparés par des virgules (sans .exe)
+    [string]$WorkDir = ''
+)
+$ErrorActionPreference = 'Continue'
+$log = Join-Path $env:ProgramData 'ControleParental\elevate-launch.log'
+function Write-Log([string]$Text) {
+    try {
+        if ((Test-Path $log) -and (Get-Item $log).Length -gt 512KB) { Move-Item $log "$log.old" -Force }
+        ('{0:s} {1}' -f (Get-Date), $Text) | Add-Content -Path $log -Encoding UTF8
+    } catch {}
+}
+Add-Type -TypeDefinition @"
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class CpLaunch {
+    [DllImport("kernel32.dll")] static extern uint WTSGetActiveConsoleSessionId();
+    [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandle(IntPtr h);
+    [DllImport("advapi32.dll", SetLastError = true)] static extern bool OpenProcessToken(IntPtr h, uint access, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError = true)] static extern bool DuplicateTokenEx(IntPtr existing, uint access, IntPtr attrs, int impLevel, int tokenType, out IntPtr newToken);
+    [DllImport("advapi32.dll", SetLastError = true)] static extern bool SetTokenInformation(IntPtr token, int infoClass, ref uint info, uint len);
+    [DllImport("userenv.dll", SetLastError = true)] static extern bool CreateEnvironmentBlock(out IntPtr env, IntPtr token, bool inherit);
+    [DllImport("userenv.dll", SetLastError = true)] static extern bool DestroyEnvironmentBlock(IntPtr env);
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool CreateProcessAsUser(IntPtr token, string app, StringBuilder cmd, IntPtr pa, IntPtr ta, bool inherit, uint flags, IntPtr env, string dir, ref STARTUPINFO si, out PROCESS_INFORMATION pi);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct STARTUPINFO { public int cb; public string lpReserved, lpDesktop, lpTitle; public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags; public short wShowWindow, cbReserved2; public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct PROCESS_INFORMATION { public IntPtr hProcess, hThread; public int dwProcessId, dwThreadId; }
+
+    const uint TOKEN_RIGHTS = 0x2 | 0x8 | 0x1 | 0x80 | 0x100;   // DUPLICATE|QUERY|ASSIGN_PRIMARY|ADJUST_DEFAULT|ADJUST_SESSIONID
+    const uint MAXIMUM_ALLOWED = 0x02000000;
+    const int SecurityIdentification = 1, TokenPrimary = 1, TokenSessionId = 12;
+    const uint CREATE_UNICODE_ENVIRONMENT = 0x400, NORMAL_PRIORITY_CLASS = 0x20;
+
+    public static uint ActiveSession() { return WTSGetActiveConsoleSessionId(); }
+
+    // Lance "app args" en SYSTEM dans la session interactive sessionId ; renvoie le PID.
+    public static int LaunchInSession(uint sessionId, string app, string args, string dir) {
+        IntPtr procToken, dupToken, env = IntPtr.Zero;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_RIGHTS, out procToken)) throw new Win32Exception(Marshal.GetLastWin32Error(), "OpenProcessToken");
+        try {
+            if (!DuplicateTokenEx(procToken, MAXIMUM_ALLOWED, IntPtr.Zero, SecurityIdentification, TokenPrimary, out dupToken)) throw new Win32Exception(Marshal.GetLastWin32Error(), "DuplicateTokenEx");
+            try {
+                uint sid = sessionId;
+                if (!SetTokenInformation(dupToken, TokenSessionId, ref sid, (uint)Marshal.SizeOf(typeof(uint)))) throw new Win32Exception(Marshal.GetLastWin32Error(), "SetTokenInformation");
+                CreateEnvironmentBlock(out env, dupToken, false);
+                STARTUPINFO si = new STARTUPINFO();
+                si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
+                si.lpDesktop = "winsta0\\default";
+                StringBuilder cmd = new StringBuilder("\"" + app + "\"" + (string.IsNullOrEmpty(args) ? "" : " " + args), 1024 + args.Length + app.Length);
+                PROCESS_INFORMATION pi;
+                if (string.IsNullOrEmpty(dir)) dir = null;
+                if (!CreateProcessAsUser(dupToken, app, cmd, IntPtr.Zero, IntPtr.Zero, false, CREATE_UNICODE_ENVIRONMENT | NORMAL_PRIORITY_CLASS, env, dir, ref si, out pi)) throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateProcessAsUser");
+                int id = pi.dwProcessId;
+                CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+                return id;
+            } finally { if (env != IntPtr.Zero) DestroyEnvironmentBlock(env); CloseHandle(dupToken); }
+        } finally { CloseHandle(procToken); }
+    }
+}
+"@
+
+if (-not (Test-Path $Target)) { Write-Log "cible introuvable : $Target"; return }
+
+# Attend qu'une session interactive existe (jusqu'à 60 s) : la tâche peut démarrer avant que le bureau soit prêt.
+$sid = [uint32]::MaxValue
+for ($i = 0; $i -lt 60; $i++) {
+    $sid = [CpLaunch]::ActiveSession()
+    if ($sid -ne [uint32]::MaxValue -and $sid -ne 0) { break }
+    Start-Sleep -Seconds 1
+}
+if ($sid -eq [uint32]::MaxValue -or $sid -eq 0) { Write-Log 'aucune session interactive : abandon'; return }
+
+if ($Kill) {
+    foreach ($name in ($Kill -split ',' | ForEach-Object { $_.Trim() -replace '\.exe$', '' } | Where-Object { $_ })) {
+        $procs = @(Get-Process -Name $name -ErrorAction SilentlyContinue)
+        if ($procs.Count -gt 0) { $procs | Stop-Process -Force -ErrorAction SilentlyContinue; Write-Log ("tué : {0} ({1} processus)" -f $name, $procs.Count) }
+    }
+    Start-Sleep -Seconds 2
+}
+try {
+    $pid2 = [CpLaunch]::LaunchInSession($sid, $Target, $Arguments, $WorkDir)
+    Write-Log ("lancé en SYSTEM (session {0}, PID {1}) : {2} {3}" -f $sid, $pid2, $Target, $Arguments)
+} catch {
+    Write-Log ("ÉCHEC du lancement de {0} : {1}" -f $Target, $_.Exception.Message)
+}
+'@
+
+function Get-ElevEntries {
+    if (-not (Test-Path $script:ElevConfig)) { return @() }
+    try { @(Get-Content $script:ElevConfig -Raw -Encoding UTF8 | ConvertFrom-Json) } catch { @() }
+}
+function Save-ElevEntries($Entries) {
+    Install-Self
+    ,@($Entries) | ConvertTo-Json -Depth 5 | Set-Content -Path $script:ElevConfig -Encoding UTF8
+}
+function Get-ElevTaskName([string]$Name) { $script:ElevPrefix + ($Name -replace '[^\w\-]', '_') }
+function Register-ElevTask($Entry) {
+    Install-Self
+    Set-Content -Path $script:ElevScriptPath -Value $script:ElevScript -Encoding UTF8
+    $args = @("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$($script:ElevScriptPath)`" -Target `"$($Entry.Target)`"")
+    if ($Entry.Arguments) { $args += " -Arguments `"$($Entry.Arguments -replace '"','\"')`"" }
+    if ($Entry.Kill)      { $args += " -Kill `"$($Entry.Kill)`"" }
+    if ($Entry.WorkDir)   { $args += " -WorkDir `"$($Entry.WorkDir)`"" }
+    $a  = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ($args -join '')
+    $tr = New-ScheduledTaskTrigger -AtLogOn
+    $p  = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    $s  = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
+    Register-ScheduledTask -TaskName (Get-ElevTaskName $Entry.Name) -Action $a -Trigger $tr -Principal $p -Settings $s -Force | Out-Null
+}
+function Add-ElevEntry([string]$Name, [string]$Target, [string]$Arguments = '', [string]$Kill = '', [string]$WorkDir = '') {
+    if (-not $Name)   { $Name = [IO.Path]::GetFileNameWithoutExtension($Target) }
+    if (-not $Target) { throw 'Chemin du programme manquant.' }
+    if (-not (Test-Path $Target)) { throw "Programme introuvable : $Target" }
+    $entry = [ordered]@{ Name = $Name; Target = $Target; Arguments = $Arguments; Kill = $Kill; WorkDir = $WorkDir }
+    $entries = @(Get-ElevEntries | Where-Object { $_.Name -ne $Name }) + $entry
+    Save-ElevEntries $entries
+    Register-ElevTask $entry
+    $entry
+}
+function Remove-ElevEntry([string]$Name) {
+    Get-ScheduledTask -TaskName (Get-ElevTaskName $Name) -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false
+    Save-ElevEntries @(Get-ElevEntries | Where-Object { $_.Name -ne $Name })
+}
+function Invoke-ElevNow([string]$Name) {
+    $task = Get-ScheduledTask -TaskName (Get-ElevTaskName $Name) -ErrorAction SilentlyContinue
+    if (-not $task) { throw "Tâche absente pour « $Name ». Enregistre d'abord l'entrée." }
+    Start-ScheduledTask -TaskName (Get-ElevTaskName $Name)
+}
+
+# (Re)démarrage d'un service en l'élevant au compte LocalSystem et en démarrage automatique.
+function Set-ServiceElevated([string]$Name) {
+    if (-not (Get-Service -Name $Name -ErrorAction SilentlyContinue)) { throw "Service introuvable : $Name" }
+    $out = @()
+    $r = & sc.exe config "$Name" obj= LocalSystem start= auto 2>&1
+    $out += "config : $r"
+    try { Restart-Service -Name $Name -Force -ErrorAction Stop; $out += 'service redémarré.' }
+    catch {
+        try { Start-Service -Name $Name -ErrorAction Stop; $out += 'service démarré.' }
+        catch { $out += "démarrage impossible : $($_.Exception.Message)" }
+    }
+    $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
+    $out += ("état : {0} ({1})" -f $svc.Status, $svc.StartType)
+    $out -join ' | '
+}
+function Get-AsusServices {
+    @(Get-Service -Name '*Armoury*', 'ASUS*', '*ASUSSystem*', '*ROG*' -ErrorAction SilentlyContinue |
+        Sort-Object Name -Unique | Select-Object Name, DisplayName, Status, StartType)
+}
+
+
 function Register-MaintTask([string]$TaskName, [string]$FileName, [string]$Content, [string]$At) {
     Install-Self
     $path = Join-Path $script:AppDir $FileName
@@ -240,6 +413,26 @@ function Get-DiagnosticReport {
     }
     if ($found -eq 0) { $r.Add('OK : aucun navigateur alternatif ni outil VPN connu détecté.') }
     else { $r.Add("-> $found élément(s) à examiner : bloque-les dans Family Safety (applications) ou supprime-les.") }
+
+    $entries = @(Get-ElevEntries)
+    if ($entries.Count -gt 0) {
+        $r.Add(''); $r.Add('=== DÉMARRAGE ÉLEVÉ (SYSTEM) ===')
+        foreach ($e in $entries) {
+            $task = Get-ScheduledTask -TaskName (Get-ElevTaskName $e.Name) -ErrorAction SilentlyContinue
+            $st = if ($task) { "tâche $($task.State)" } else { '! tâche absente' }
+            $r.Add(('  {0} -> {1} {2} [{3}]' -f $e.Name, $e.Target, $e.Arguments, $st))
+        }
+        $log = Join-Path $script:AppDir 'elevate-launch.log'
+        if (Test-Path $log) { $r.Add('Dernières lignes de elevate-launch.log :'); Get-Content $log -Tail 8 -Encoding UTF8 | ForEach-Object { $r.Add("  $_") } }
+    }
+    $asus = @(Get-AsusServices)
+    if ($asus.Count -gt 0) {
+        $r.Add(''); $r.Add('=== SERVICES ASUS / ARMOURY CRATE ===')
+        foreach ($svc in $asus) {
+            $flag = '  '; if ($svc.Status -ne 'Running') { $flag = '! ' }
+            $r.Add(('{0}{1} : {2} ({3})' -f $flag, $svc.Name, $svc.Status, $svc.StartType))
+        }
+    }
 
     $r.Add(''); $r.Add('=== PROGRAMMES AU DÉMARRAGE (hors Microsoft/Windows) ===')
     $startup = @(Get-CimInstance Win32_StartupCommand -ErrorAction SilentlyContinue | Where-Object { $_.Command -notmatch 'Microsoft|Windows' })
@@ -532,6 +725,9 @@ if ($script:CliMode) {
         Write-Host ("Terminé : {0} ajouté(s), {1} déjà envoyé(s), {2} erreur(s)." -f $res.Ok, $res.Skipped, $res.Failed.Count)
         return
     }
+    if ($ElevList)   { foreach ($e in @(Get-ElevEntries)) { $task = Get-ScheduledTask -TaskName (Get-ElevTaskName $e.Name) -ErrorAction SilentlyContinue; Write-Host ('{0,-20} {1} {2}  [{3}]' -f $e.Name, $e.Target, $e.Arguments, $(if ($task) { $task.State } else { 'tâche absente' })) }; return }
+    if ($ElevTest)   { Invoke-ElevNow $ElevTest; Write-Host "Lancé : $ElevTest (voir elevate-launch.log)."; return }
+    if ($SvcElevate) { Write-Host (Set-ServiceElevated $SvcElevate); return }
     if (($Apply -or $Revert) -and -not $Quiet) { Backup-State }
     if ($Diagnostic) { Get-DiagnosticReport | ForEach-Object { Write-Host $_ } }
     if ($Apply)  { foreach ($id in (Resolve-Ids $Apply))  { Invoke-TweakApply $script:ById[$id]; Remove-Reapply $id; if (-not $Quiet) { Write-Host "[ON ] $id" } } }
@@ -598,7 +794,8 @@ Install-Self
         <Button x:Name="BtnAll" Content="Tout activer (recommandé)" Padding="12,4" Margin="0,0,8,0"/>
         <Button x:Name="BtnRefresh" Content="Rafraîchir" Padding="12,4" Margin="0,0,8,0"/>
         <Button x:Name="BtnDiag" Content="Diagnostic" Padding="12,4" Margin="0,0,8,0"/>
-        <Button x:Name="BtnFs" Content="Family Safety (cloud)..." Padding="12,4"/>
+        <Button x:Name="BtnFs" Content="Family Safety (cloud)..." Padding="12,4" Margin="0,0,8,0"/>
+        <Button x:Name="BtnElev" Content="Démarrage élevé (SYSTEM)..." Padding="12,4"/>
       </WrapPanel>
     </Border>
     <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" Margin="0,4,0,0">
@@ -666,6 +863,143 @@ function Invoke-UserToggle([string]$Id, [bool]$Want) {
         $window.Cursor = [System.Windows.Input.Cursors]::Arrow
     }
     Update-AllStates
+}
+
+$script:ElevXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Démarrage élevé (SYSTEM)" Width="900" Height="720" MinWidth="720" MinHeight="560"
+        WindowStartupLocation="CenterOwner" Background="#F3F3F3" FontFamily="Segoe UI" FontSize="13">
+  <Grid Margin="14">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="120"/>
+    </Grid.RowDefinitions>
+    <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="#555555" Text="Lance un programme EN SYSTEM dans la session de l'enfant à chaque ouverture de session, et/ou élève un service. C'est toi (admin) qui choisis les cibles ici ; elles sont figées dans des tâches planifiées SYSTEM que l'enfant ne peut ni voir ni modifier. À tester : certains programmes se comportent mal lancés en SYSTEM."/>
+    <TabControl Grid.Row="1" Margin="0,10,0,0">
+      <TabItem Header="Programmes au démarrage de session">
+        <Grid Margin="10">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="320"/>
+            <ColumnDefinition Width="*"/>
+          </Grid.ColumnDefinitions>
+          <StackPanel Grid.Column="0" Margin="0,0,14,0">
+            <TextBlock Text="Programmes configurés" FontWeight="SemiBold"/>
+            <ListBox x:Name="ElevList" Height="340" Margin="0,6,0,0"/>
+            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+              <Button x:Name="BtnElevTest" Content="Tester maintenant" Padding="10,3" Margin="0,0,8,0"/>
+              <Button x:Name="BtnElevDel" Content="Supprimer" Padding="10,3"/>
+            </StackPanel>
+          </StackPanel>
+          <StackPanel Grid.Column="1">
+            <TextBlock Text="Ajouter / modifier un programme" FontWeight="SemiBold" FontSize="14"/>
+            <TextBlock Text="Nom (repère) :" Margin="0,8,0,2"/>
+            <TextBox x:Name="ElevName"/>
+            <TextBlock Text="Programme (.exe) :" Margin="0,8,0,2"/>
+            <StackPanel Orientation="Horizontal">
+              <TextBox x:Name="ElevTarget" Width="360" Margin="0,0,8,0"/>
+              <Button x:Name="BtnElevBrowse" Content="Parcourir..." Padding="10,3"/>
+            </StackPanel>
+            <TextBlock Text="Arguments (facultatif) :" Margin="0,8,0,2"/>
+            <TextBox x:Name="ElevArgs"/>
+            <TextBlock Text="Processus à tuer d'abord (noms séparés par des virgules, sans .exe ; facultatif) :" Margin="0,8,0,2" TextWrapping="Wrap"/>
+            <TextBox x:Name="ElevKill"/>
+            <TextBlock TextWrapping="Wrap" Foreground="#666666" FontSize="11" Margin="0,4,0,0" Text="Exemple Armoury Crate : laisse Arguments vide et mets dans « tuer d'abord » les noms des processus Armoury Crate (par ex. ArmouryCrate.UserSessionHelper, ArmouryCrateSE). La tâche les relancera en SYSTEM à l'ouverture de session."/>
+            <Button x:Name="BtnElevSave" Content="Enregistrer (crée/replace la tâche)" Padding="12,5" FontWeight="SemiBold" Margin="0,12,0,0" HorizontalAlignment="Left"/>
+          </StackPanel>
+        </Grid>
+      </TabItem>
+      <TabItem Header="Services">
+        <StackPanel Margin="12">
+          <TextBlock TextWrapping="Wrap" Text="Passe un service au compte LocalSystem (droits maximaux) + démarrage automatique, puis le redémarre. Utile si un service (Armoury Crate, ASUS) est arrêté ou tourne avec trop peu de droits."/>
+          <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+            <TextBlock Text="Service : " VerticalAlignment="Center"/>
+            <ComboBox x:Name="SvcList" Width="360" IsEditable="True" Margin="0,0,8,0"/>
+            <Button x:Name="BtnSvcReload" Content="Actualiser" Padding="10,3" Margin="0,0,8,0"/>
+            <Button x:Name="BtnSvcElevate" Content="Élever + (re)démarrer" Padding="12,3" FontWeight="SemiBold"/>
+          </StackPanel>
+          <TextBlock TextWrapping="Wrap" Foreground="#666666" FontSize="11" Margin="0,6,0,0" Text="La liste propose les services ASUS / Armoury détectés ; tu peux aussi taper un autre nom de service."/>
+        </StackPanel>
+      </TabItem>
+    </TabControl>
+    <TextBlock Grid.Row="2" Text="Journal :" Margin="0,10,0,2" FontWeight="SemiBold"/>
+    <TextBox Grid.Row="3" x:Name="ElevOut" IsReadOnly="True" FontFamily="Consolas" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
+  </Grid>
+</Window>
+'@
+
+function Write-ElevOut([string]$t) { $script:Elev.Out.AppendText(('[{0:HH:mm:ss}] {1}' -f (Get-Date), $t) + "`r`n"); $script:Elev.Out.ScrollToEnd() }
+function Update-ElevList {
+    $script:Elev.List.Items.Clear()
+    foreach ($e in @(Get-ElevEntries)) {
+        $task = Get-ScheduledTask -TaskName (Get-ElevTaskName $e.Name) -ErrorAction SilentlyContinue
+        $mark = if ($task) { '' } else { '  (tâche absente)' }
+        $it = New-Object System.Windows.Controls.ListBoxItem
+        $it.Content = "$($e.Name) -> $($e.Target)$mark"
+        $it.Tag = $e.Name
+        [void]$script:Elev.List.Items.Add($it)
+    }
+}
+function Update-ElevSvc {
+    $script:Elev.Svc.Items.Clear()
+    foreach ($s in @(Get-AsusServices)) { [void]$script:Elev.Svc.Items.Add("$($s.Name)  ($($s.Status))") }
+}
+function Get-ElevSelectedSvc { $v = "$($script:Elev.Svc.Text)"; if (-not $v) { $v = "$($script:Elev.Svc.SelectedItem)" }; ($v -split '\s')[0] }
+
+function Show-ElevateWindow {
+    $w = [System.Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader ([xml]$script:ElevXaml)))
+    $w.Owner = $window
+    $c = @{ Window = $w }
+    foreach ($n in 'ElevList', 'BtnElevTest', 'BtnElevDel', 'ElevName', 'ElevTarget', 'BtnElevBrowse', 'ElevArgs', 'ElevKill', 'BtnElevSave', 'SvcList', 'BtnSvcReload', 'BtnSvcElevate', 'ElevOut') { $c[$n] = $w.FindName($n) }
+    $c.List = $c.ElevList; $c.Svc = $c.SvcList; $c.Out = $c.ElevOut
+    $script:Elev = $c
+
+    $c.ElevList.Add_SelectionChanged({
+        $sel = $script:Elev.ElevList.SelectedItem
+        if (-not $sel) { return }
+        $e = @(Get-ElevEntries | Where-Object { $_.Name -eq $sel.Tag })[0]
+        if ($e) { $script:Elev.ElevName.Text = $e.Name; $script:Elev.ElevTarget.Text = $e.Target; $script:Elev.ElevArgs.Text = $e.Arguments; $script:Elev.ElevKill.Text = $e.Kill }
+    })
+    $c.BtnElevBrowse.Add_Click({
+        $dlg = New-Object Microsoft.Win32.OpenFileDialog
+        $dlg.Filter = 'Programmes (*.exe)|*.exe|Tous les fichiers (*.*)|*.*'
+        if ($dlg.ShowDialog()) {
+            $script:Elev.ElevTarget.Text = $dlg.FileName
+            if (-not $script:Elev.ElevName.Text) { $script:Elev.ElevName.Text = [IO.Path]::GetFileNameWithoutExtension($dlg.FileName) }
+        }
+    })
+    $c.BtnElevSave.Add_Click({
+        try {
+            $e = Add-ElevEntry -Name $script:Elev.ElevName.Text -Target $script:Elev.ElevTarget.Text -Arguments $script:Elev.ElevArgs.Text -Kill $script:Elev.ElevKill.Text
+            Write-ElevOut "Enregistré : $($e.Name) -> $($e.Target). Tâche créée (SYSTEM, à l'ouverture de session)."
+            Update-ElevList
+        } catch { Write-UiError 'Elev enregistrer' $_; Write-ElevOut "Erreur : $($_.Exception.Message)" }
+    })
+    $c.BtnElevDel.Add_Click({
+        $sel = $script:Elev.ElevList.SelectedItem
+        if (-not $sel) { Write-ElevOut 'Sélectionne un programme à supprimer.'; return }
+        try { Remove-ElevEntry ([string]$sel.Tag); Write-ElevOut "Supprimé : $($sel.Tag)."; Update-ElevList }
+        catch { Write-UiError 'Elev supprimer' $_; Write-ElevOut "Erreur : $($_.Exception.Message)" }
+    })
+    $c.BtnElevTest.Add_Click({
+        $sel = $script:Elev.ElevList.SelectedItem
+        if (-not $sel) { Write-ElevOut 'Sélectionne un programme à tester.'; return }
+        try { Invoke-ElevNow ([string]$sel.Tag); Write-ElevOut "Lancé maintenant : $($sel.Tag). Vérifie l'écran de l'enfant et elevate-launch.log." }
+        catch { Write-UiError 'Elev test' $_; Write-ElevOut "Erreur : $($_.Exception.Message)" }
+    })
+    $c.BtnSvcReload.Add_Click({ Update-ElevSvc; Write-ElevOut 'Liste des services actualisée.' })
+    $c.BtnSvcElevate.Add_Click({
+        $name = Get-ElevSelectedSvc
+        if (-not $name) { Write-ElevOut 'Indique un nom de service.'; return }
+        $script:Elev.Window.Cursor = [System.Windows.Input.Cursors]::Wait
+        try { Write-ElevOut (Set-ServiceElevated $name) } catch { Write-UiError 'Service élever' $_; Write-ElevOut "Erreur : $($_.Exception.Message)" }
+        finally { $script:Elev.Window.Cursor = [System.Windows.Input.Cursors]::Arrow; Update-ElevSvc }
+    })
+    Update-ElevList; Update-ElevSvc
+    Write-ElevOut 'Prêt.'
+    [void]$w.ShowDialog()
 }
 
 function Show-DiagnosticWindow {
@@ -1302,6 +1636,7 @@ $note.Text = "À faire à la main (non automatisable) :`n" +
 $window.FindName('BtnRefresh').Add_Click({ Update-AllStates; Set-StatusText 'États relus.' })
 $window.FindName('BtnDiag').Add_Click({ Show-DiagnosticWindow })
 $window.FindName('BtnFs').Add_Click({ Show-FamilySafetyWindow })
+$window.FindName('BtnElev').Add_Click({ Show-ElevateWindow })
 $window.FindName('BtnAll').Add_Click({
     $window.Cursor = [System.Windows.Input.Cursors]::Wait
     try {

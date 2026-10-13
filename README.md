@@ -33,6 +33,8 @@ La fenêtre Family Safety, onglet Sites web : réglages du filtre, ajout de site
 - **Windows** : SmartScreen en mode « Bloquer », widgets et suggestions web désactivés ; en option : applications du
   Store uniquement, stockage USB désactivé, élévation refusée aux comptes standard, historique d'activités et
   localisation désactivés, maintenance hebdomadaire (fichiers temporaires, `winget upgrade`).
+- **Démarrage élevé (SYSTEM)** : menu pour lancer un programme choisi EN SYSTEM dans la session de l'enfant à
+  l'ouverture de session, et pour (re)démarrer un service en l'élevant au compte LocalSystem (voir plus bas).
 - Réactivation automatique après un délai quand tu lèves une protection (tâche planifiée SYSTEM),
   sauvegarde du registre avant chaque modification, diagnostic (comptes, navigateurs ou VPN en trop, démarrage).
 
@@ -55,6 +57,7 @@ La fenêtre Family Safety, onglet Sites web : réglages du filtre, ajout de site
 | Tentatives bloquées, historique web et recherches | Format des réponses non confirmé |
 | Blocage d'applications, blocage d'appareil, limites de temps d'écran | Non testé en réel (gestion du fuseau horaire non confirmée) |
 | Protections locales | Code vérifié, pas encore éprouvé sur un PC d'enfant : teste chacune avant de t'y fier |
+| Démarrage élevé (SYSTEM), élévation de service | Non testé sur un appareil réel : vérifie `elevate-launch.log` et l'écran de l'enfant |
 
 ## Prérequis
 - Windows 10 ou 11 (Home compris), Windows PowerShell 5.1, Microsoft Edge.
@@ -77,6 +80,41 @@ Le script demande l'élévation (UAC). En ligne de commande (administrateur) :
 .\ControleParental.ps1 -Diagnostic                              # rapport de diagnostic
 .\ControleParental.ps1 -FsImport liste.txt -FsChild Prenom      # ajout en masse de sites autorisés (-FsBlock pour bloquer)
 ```
+
+## Démarrage élevé (SYSTEM) — menu « Démarrage élevé »
+Sur un compte standard, certaines applications n'ont pas les droits d'agir sur le matériel. Cas typique : sur une
+**ROG Ally**, Armoury Crate ne peut pas appliquer le mode de puissance depuis le compte de l'enfant, et la
+consommation reste au maximum. Donner à l'enfant un accès administrateur (compte admin, `runas /savecred`)
+réglerait le symptôme mais annulerait Family Safety et toutes les protections : il pourrait tout élever.
+
+Le menu **Démarrage élevé (SYSTEM)** fait ce travail sans donner de droits à l'enfant. C'est toi, admin, qui
+choisis les cibles dans la console (elle-même protégée par l'UAC) ; chaque cible est **figée dans une tâche
+planifiée SYSTEM** que l'enfant ne peut ni voir ni modifier. Il déclenche l'ouverture de session, mais ne choisit
+jamais ce qui est élevé.
+
+- **Programmes au démarrage de session** : tu ajoutes un `.exe` (et, au besoin, des arguments et une liste de
+  processus à tuer d'abord). La console crée une tâche SYSTEM déclenchée à l'ouverture de session, qui lance le
+  programme **en SYSTEM, dans la session interactive de l'enfant** (même principe que `PsExec -s -i` : jeton SYSTEM
+  injecté dans la session active). Le bouton « Tester maintenant » le lance tout de suite.
+- **Services** : tu passes un service au compte **LocalSystem** + démarrage automatique, puis la console le
+  redémarre. La liste propose les services ASUS / Armoury Crate détectés.
+
+Pour une ROG Ally : laisse les arguments vides, mets les processus Armoury Crate dans « tuer d'abord » (par ex.
+`ArmouryCrate.UserSessionHelper`, `ArmouryCrateSE`) et pointe la cible sur l'exécutable d'Armoury Crate. Ta tâche
+qui lance le mode Xbox reste utile pour l'interface manette. **À tester** : certains programmes se comportent mal
+lancés en SYSTEM ; si c'est le cas, l'autre piste est d'élever le ou les services d'Armoury Crate dans l'onglet
+Services. Journal : `C:\ProgramData\ControleParental\elevate-launch.log` ; le diagnostic affiche aussi les
+entrées configurées et l'état des services ASUS.
+
+```powershell
+.\ControleParental.ps1 -ElevList                 # liste les programmes configurés
+.\ControleParental.ps1 -ElevTest "ArmouryCrate"  # lance maintenant l'entrée nommée ainsi
+.\ControleParental.ps1 -SvcElevate ArmouryCrateService   # élève + redémarre un service
+```
+
+> ⚠️ Lancer un programme en SYSTEM lui donne les droits maximaux de la machine. N'ajoute que des programmes de
+> confiance (Armoury Crate et autres outils constructeur). Ce menu ne crée aucun champ où l'enfant fournirait
+> lui-même une cible : il ne peut pas s'en servir pour élever autre chose.
 
 ## Liste blanche
 `exemple-liste-blanche.txt` est une proposition pour un enfant de 11 ans (collège, francophone), à adapter.
