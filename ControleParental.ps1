@@ -37,11 +37,14 @@ param(
     [switch]$ElevList,
     [string]$ElevTest,
     [string]$SvcElevate,
+    [string]$GroupGrant,
+    [string]$GroupRevoke,
+    [string]$Child,
     [switch]$Quiet
 )
 
 $ErrorActionPreference = 'Stop'
-$script:CliMode = [bool]($Apply -or $Revert -or $Status -or $Diagnostic -or $FsRun -or $FsProbe -or $FsImport -or $ElevList -or $ElevTest -or $SvcElevate)
+$script:CliMode = [bool]($Apply -or $Revert -or $Status -or $Diagnostic -or $FsRun -or $FsProbe -or $FsImport -or $ElevList -or $ElevTest -or $SvcElevate -or $GroupGrant -or $GroupRevoke)
 
 # ====================================================================== élévation
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -447,6 +450,41 @@ function Get-AdminNames {
     }
 }
 
+# ====================================================================== groupes du compte enfant
+# Liste fermée de groupes locaux sans risque pour le contrôle parental. Volontairement absents : Administrateurs,
+# Opérateurs de configuration réseau (changer le DNS = contourner le filtre), Opérateurs de sauvegarde (lecture de
+# tout fichier, chemin vers l'admin), Propriétaires d'appareil, Hyper-V, accès à distance.
+$script:ChildGroups = @(
+    @{ Id = 'perf-log'; Sid = 'S-1-5-32-559'; Name = 'Compteur FPS dans les jeux'
+       Desc = "Groupe « Utilisateurs du journal de performances ». Permet aux overlays FPS (Armoury Crate, Xbox Game Bar, PresentMon) de compter les images affichées par les jeux. Ne donne aucun droit administrateur." },
+    @{ Id = 'perf-mon'; Sid = 'S-1-5-32-558'; Name = 'Compteurs de performance (CPU, GPU, mémoire)'
+       Desc = "Groupe « Utilisateurs de l'Analyseur de performances ». Lecture seule des compteurs d'utilisation, pour les overlays de performance. Ne donne aucun droit administrateur." }
+)
+function Get-StandardUserNames {
+    $admins = @(Get-AdminNames)
+    @(Get-LocalUser | Where-Object { $_.Enabled -and $_.SID.Value -notmatch '-(500|501|503|504)$' -and ($admins -notcontains $_.Name) } | ForEach-Object { $_.Name })
+}
+function Get-GroupMemberNames([string]$Sid) {
+    try { @(Get-LocalGroupMember -SID $Sid -ErrorAction Stop | ForEach-Object { ($_.Name -split '\\')[-1] }) }
+    catch {
+        # Get-LocalGroupMember échoue si le groupe contient un SID orphelin : repli sur ADSI.
+        $g = (Get-LocalGroup -SID $Sid).Name
+        @(([ADSI]"WinNT://./$g,group").Invoke('Members') | ForEach-Object { $_.GetType().InvokeMember('Name', 'GetProperty', $null, $_, $null) })
+    }
+}
+function Test-ChildGroup([string]$User, [string]$Id) {
+    $g = @($script:ChildGroups | Where-Object { $_.Id -eq $Id })[0]
+    (@(Get-GroupMemberNames $g.Sid) -contains $User)
+}
+function Set-ChildGroup([string]$User, [string]$Id, [bool]$Want) {
+    $g = @($script:ChildGroups | Where-Object { $_.Id -eq $Id })[0]
+    if (-not $g) { throw "Groupe inconnu : $Id (valeurs : $(($script:ChildGroups | ForEach-Object { $_.Id }) -join ', '))" }
+    if ((Get-StandardUserNames) -notcontains $User) { throw "« $User » n'est pas un compte standard actif." }
+    $has = Test-ChildGroup $User $Id
+    if ($Want -and -not $has) { Add-LocalGroupMember -SID $g.Sid -Member $User }
+    elseif (-not $Want -and $has) { Remove-LocalGroupMember -SID $g.Sid -Member $User }
+}
+
 function Get-DiagnosticReport {
     $r = New-Object System.Collections.Generic.List[string]
 
@@ -456,6 +494,10 @@ function Get-DiagnosticReport {
         $std = @(Get-LocalUser | Where-Object { $_.Enabled -and $_.SID.Value -notmatch '-(500|501|503|504)$' -and ($admins -notcontains $_.Name) } | ForEach-Object { $_.Name })
         $r.Add('Administrateurs : ' + ($admins -join ', '))
         $r.Add('Comptes standard : ' + ($std -join ', '))
+        foreach ($g in $script:ChildGroups) {
+            $m = @(Get-GroupMemberNames $g.Sid | Where-Object { $std -contains $_ })
+            if ($m.Count -gt 0) { $r.Add("  $($g.Name) : $($m -join ', ')") }
+        }
         $r.Add("-> Le compte de l'enfant doit figurer parmi les comptes standard, jamais parmi les administrateurs.")
     } catch { $r.Add("Lecture des comptes impossible : $($_.Exception.Message)") }
 
@@ -812,6 +854,12 @@ if ($script:CliMode) {
     if ($ElevList)   { foreach ($e in @(Get-ElevEntries)) { $task = Get-ScheduledTask -TaskName (Get-ElevTaskName $e.Name) -ErrorAction SilentlyContinue; $what = if ($e.Uwp) { "UWP $($e.Uwp)" } else { "$($e.Target) $($e.Arguments)" }; Write-Host ('{0,-20} {1}  [{2}]' -f $e.Name, $what, $(if ($task) { $task.State } else { 'tâche absente' })) }; return }
     if ($ElevTest)   { Invoke-ElevNow $ElevTest; Write-Host "Lancé : $ElevTest (voir elevate-launch.log)."; return }
     if ($SvcElevate) { Write-Host (Set-ServiceElevated $SvcElevate); return }
+    if ($GroupGrant -or $GroupRevoke) {
+        if (-not $Child) { throw "Précise le compte avec -Child (comptes standard : $((Get-StandardUserNames) -join ', '))." }
+        if ($GroupGrant)  { Set-ChildGroup $Child $GroupGrant $true;   Write-Host "[ON ] $GroupGrant pour $Child (effet à la prochaine ouverture de session)" }
+        if ($GroupRevoke) { Set-ChildGroup $Child $GroupRevoke $false; Write-Host "[OFF] $GroupRevoke pour $Child (effet à la prochaine ouverture de session)" }
+        return
+    }
     if (($Apply -or $Revert) -and -not $Quiet) { Backup-State }
     if ($Diagnostic) { Get-DiagnosticReport | ForEach-Object { Write-Host $_ } }
     if ($Apply)  { foreach ($id in (Resolve-Ids $Apply))  { Invoke-TweakApply $script:ById[$id]; Remove-Reapply $id; if (-not $Quiet) { Write-Host "[ON ] $id" } } }
@@ -879,7 +927,8 @@ Install-Self
         <Button x:Name="BtnRefresh" Content="Rafraîchir" Padding="12,4" Margin="0,0,8,0"/>
         <Button x:Name="BtnDiag" Content="Diagnostic" Padding="12,4" Margin="0,0,8,0"/>
         <Button x:Name="BtnFs" Content="Family Safety (cloud)..." Padding="12,4" Margin="0,0,8,0"/>
-        <Button x:Name="BtnElev" Content="Démarrage élevé (SYSTEM)..." Padding="12,4"/>
+        <Button x:Name="BtnElev" Content="Démarrage élevé (SYSTEM)..." Padding="12,4" Margin="0,0,8,0"/>
+        <Button x:Name="BtnGroups" Content="Groupes du compte enfant..." Padding="12,4"/>
       </WrapPanel>
     </Border>
     <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" Margin="0,4,0,0">
@@ -1124,6 +1173,95 @@ function Show-ElevateWindow {
     })
     Update-ElevList; Update-ElevSvc
     Write-ElevOut 'Prêt.'
+    [void]$w.ShowDialog()
+}
+
+$script:GroupsXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Groupes du compte enfant" Width="720" Height="560" MinWidth="560" MinHeight="420"
+        WindowStartupLocation="CenterOwner" Background="#F3F3F3" FontFamily="Segoe UI" FontSize="13">
+  <Grid Margin="14">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="#555555" Text="Donne au compte enfant des autorisations précises, sans en faire un administrateur. Seuls des groupes sans risque pour le contrôle parental sont proposés. Effet à la prochaine ouverture de session de l'enfant."/>
+    <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,10,0,6">
+      <TextBlock Text="Compte enfant : " VerticalAlignment="Center"/>
+      <ComboBox x:Name="GrpUser" Width="220"/>
+    </StackPanel>
+    <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
+      <StackPanel>
+        <StackPanel x:Name="GrpPanel"/>
+        <TextBlock TextWrapping="Wrap" Foreground="#666666" FontSize="11" Margin="2,12,0,0" Text="Non proposés, volontairement : Administrateurs ; Opérateurs de configuration réseau (pourrait changer le DNS et contourner le filtre) ; Opérateurs de sauvegarde (lecture de tout fichier, chemin vers l'admin) ; Propriétaires d'appareil, Hyper-V, accès à distance."/>
+      </StackPanel>
+    </ScrollViewer>
+    <TextBlock Grid.Row="3" x:Name="GrpStatus" Margin="0,10,0,0" TextWrapping="Wrap" Foreground="#333333"/>
+  </Grid>
+</Window>
+'@
+
+function Update-GroupToggles {
+    $user = [string]$script:Grp.User.SelectedItem
+    foreach ($id in @($script:Grp.Toggles.Keys)) {
+        $t = $script:Grp.Toggles[$id]
+        $t.IsEnabled = [bool]$user
+        try { $t.IsChecked = ($user -and (Test-ChildGroup $user $id)) } catch { Write-UiError "Groupe $id" $_; $t.IsChecked = $false }
+    }
+}
+
+function Show-GroupsWindow {
+    $w = [System.Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader ([xml]$script:GroupsXaml)))
+    $w.Owner = $window
+    $script:Grp = @{ Window = $w; User = $w.FindName('GrpUser'); Status = $w.FindName('GrpStatus'); Toggles = @{} }
+    $panel2 = $w.FindName('GrpPanel')
+    foreach ($g in $script:ChildGroups) {
+        $card = New-Object System.Windows.Controls.Border
+        $card.Background = $bc.ConvertFromString('White')
+        $card.CornerRadius = New-Object System.Windows.CornerRadius(6)
+        $card.Padding = New-Object System.Windows.Thickness(12)
+        $card.Margin = New-Object System.Windows.Thickness(0, 6, 0, 0)
+        $grid = New-Object System.Windows.Controls.Grid
+        $c1 = New-Object System.Windows.Controls.ColumnDefinition; $c1.Width = New-Object System.Windows.GridLength(1, 'Star')
+        $c2 = New-Object System.Windows.Controls.ColumnDefinition; $c2.Width = [System.Windows.GridLength]::Auto
+        [void]$grid.ColumnDefinitions.Add($c1); [void]$grid.ColumnDefinitions.Add($c2)
+        $sp = New-Object System.Windows.Controls.StackPanel
+        $n = New-Object System.Windows.Controls.TextBlock; $n.Text = $g.Name; $n.FontWeight = 'SemiBold'; $n.TextWrapping = 'Wrap'
+        $d = New-Object System.Windows.Controls.TextBlock; $d.Text = $g.Desc; $d.TextWrapping = 'Wrap'; $d.Foreground = $bc.ConvertFromString('#555555')
+        $d.Margin = New-Object System.Windows.Thickness(0, 3, 12, 0)
+        [void]$sp.Children.Add($n); [void]$sp.Children.Add($d)
+        $tg = New-Object System.Windows.Controls.Primitives.ToggleButton
+        $tg.Style = $window.FindResource('SwitchStyle')
+        $tg.Tag = $g.Id
+        $tg.VerticalAlignment = 'Center'
+        $tg.Add_Click({
+            param($s, $e)
+            $user = [string]$script:Grp.User.SelectedItem
+            $id = [string]$s.Tag
+            try {
+                Set-ChildGroup $user $id ([bool]$s.IsChecked)
+                $what = if ($s.IsChecked) { 'accordé' } else { 'retiré' }
+                $script:Grp.Status.Text = "$what à $user. L'enfant doit fermer sa session puis la rouvrir pour que ça prenne effet."
+            } catch {
+                Write-UiError "Groupe $id" $_
+                $script:Grp.Status.Text = "Erreur : $($_.Exception.Message)"
+            }
+            Update-GroupToggles
+        })
+        [System.Windows.Controls.Grid]::SetColumn($tg, 1)
+        [void]$grid.Children.Add($sp); [void]$grid.Children.Add($tg)
+        $card.Child = $grid
+        [void]$panel2.Children.Add($card)
+        $script:Grp.Toggles[$g.Id] = $tg
+    }
+    $users = @(Get-StandardUserNames)
+    foreach ($u in $users) { [void]$script:Grp.User.Items.Add($u) }
+    if ($users.Count -gt 0) { $script:Grp.User.SelectedIndex = 0 } else { $script:Grp.Status.Text = 'Aucun compte standard actif trouvé.' }
+    $script:Grp.User.Add_SelectionChanged({ Update-GroupToggles })
+    Update-GroupToggles
     [void]$w.ShowDialog()
 }
 
@@ -1762,6 +1900,7 @@ $window.FindName('BtnRefresh').Add_Click({ Update-AllStates; Set-StatusText 'Ét
 $window.FindName('BtnDiag').Add_Click({ Show-DiagnosticWindow })
 $window.FindName('BtnFs').Add_Click({ Show-FamilySafetyWindow })
 $window.FindName('BtnElev').Add_Click({ Show-ElevateWindow })
+$window.FindName('BtnGroups').Add_Click({ Show-GroupsWindow })
 $window.FindName('BtnAll').Add_Click({
     $window.Cursor = [System.Windows.Input.Cursors]::Wait
     try {

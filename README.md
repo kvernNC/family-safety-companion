@@ -33,6 +33,8 @@ La fenêtre Family Safety, onglet Sites web : réglages du filtre, ajout de site
 - **Windows** : SmartScreen en mode « Bloquer », widgets et suggestions web désactivés ; en option : applications du
   Store uniquement, stockage USB désactivé, élévation refusée aux comptes standard, historique d'activités et
   localisation désactivés, maintenance hebdomadaire (fichiers temporaires, `winget upgrade`).
+- **Groupes du compte enfant** : autorisations précises sans droits administrateur, choisies dans une liste fermée
+  et sans risque (compteur FPS des jeux, compteurs de performance). Voir plus bas.
 - **Démarrage élevé** : menu pour lancer un programme à l'ouverture de session de l'enfant — app UWP (ex. Armoury
   Crate SE) dans sa session, ou `.exe` en SYSTEM — remplacer l'accueil Xbox par ce programme (FSE), et (re)démarrer
   un service en l'élevant au compte LocalSystem (voir plus bas).
@@ -58,6 +60,7 @@ La fenêtre Family Safety, onglet Sites web : réglages du filtre, ajout de site
 | Tentatives bloquées, historique web et recherches | Format des réponses non confirmé |
 | Blocage d'applications, blocage d'appareil, limites de temps d'écran | Non testé en réel (gestion du fuseau horaire non confirmée) |
 | Protections locales | Code vérifié, pas encore éprouvé sur un PC d'enfant : teste chacune avant de t'y fier |
+| Groupes du compte enfant | Lecture des comptes et des groupes vérifiée sur ROG Ally ; effet sur le compteur FPS à confirmer |
 | Démarrage élevé (UWP ou SYSTEM), remplacement de l'accueil Xbox, élévation de service | Non testé sur un appareil réel : vérifie `elevate-launch.log` et l'écran de l'enfant |
 
 ## Prérequis
@@ -128,6 +131,28 @@ configurées et l'état des services ASUS.
 > confiance. Ce menu ne crée aucun champ où l'enfant fournirait lui-même une cible : il ne peut pas s'en servir
 > pour lancer ou élever autre chose. Vérifie les noms de processus exacts dans le Gestionnaire des tâches de ton
 > appareil (ils varient selon les versions de Windows et d'Armoury Crate).
+
+## Groupes du compte enfant — bouton « Groupes du compte enfant »
+Certaines fonctions des jeux demandent une autorisation Windows qu'un compte standard n'a pas, sans pour autant
+justifier des droits administrateur. Exemple : sur ROG Ally, Armoury Crate n'affiche pas les FPS sur le compte
+de l'enfant, parce que compter les images d'un jeu passe par le traçage d'événements Windows (ETW).
+
+La fenêtre propose une **liste fermée** de groupes locaux, avec un interrupteur par groupe :
+
+| Interrupteur | Groupe Windows | Effet |
+|---|---|---|
+| Compteur FPS dans les jeux | Utilisateurs du journal de performances (`S-1-5-32-559`) | Overlays FPS (Armoury Crate, Xbox Game Bar, PresentMon) |
+| Compteurs de performance | Utilisateurs de l'Analyseur de performances (`S-1-5-32-558`) | Lecture des compteurs CPU, GPU, mémoire |
+
+Effet à la **prochaine ouverture de session** de l'enfant. Volontairement absents : Administrateurs, Opérateurs de
+configuration réseau (pourrait changer le DNS et contourner le filtre), Opérateurs de sauvegarde (lecture de tout
+fichier, chemin connu vers l'admin), Propriétaires d'appareil, Hyper-V et accès à distance. Seuls les comptes
+standard actifs sont proposés.
+
+```powershell
+.\ControleParental.ps1 -GroupGrant perf-log -Child isaac    # accorde (perf-log ou perf-mon)
+.\ControleParental.ps1 -GroupRevoke perf-log -Child isaac   # retire
+```
 
 ## Liste blanche
 `exemple-liste-blanche.txt` est une proposition pour un enfant de 11 ans (collège, francophone), à adapter.
