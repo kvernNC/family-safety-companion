@@ -378,11 +378,19 @@ if ($KillAfter) {
 
 function Get-ElevEntries {
     if (-not (Test-Path $script:ElevConfig)) { return @() }
-    try { @(Get-Content $script:ElevConfig -Raw -Encoding UTF8 | ConvertFrom-Json) } catch { @() }
+    try {
+        # Ne garde que les objets qui ressemblent à une entrée (nom non vide) : ignore les fichiers d'anciennes
+        # versions mal sérialisés (enveloppes value/Count).
+        @(Get-Content $script:ElevConfig -Raw -Encoding UTF8 | ConvertFrom-Json) | Where-Object { $_ -and $_.Name }
+    } catch { @() }
 }
 function Save-ElevEntries($Entries) {
     Install-Self
-    ,@($Entries) | ConvertTo-Json -Depth 5 | Set-Content -Path $script:ElevConfig -Encoding UTF8
+    # On sérialise chaque entrée séparément puis on assemble le tableau à la main : ConvertTo-Json applati un
+    # tableau à un seul élément en objet, et l'idiome ,@(...) finit par imbriquer des enveloppes value/Count.
+    $items = @(@($Entries) | Where-Object { $_ } | ForEach-Object { $_ | ConvertTo-Json -Depth 5 -Compress })
+    $json = '[' + ($items -join ',') + ']'
+    Set-Content -Path $script:ElevConfig -Value $json -Encoding UTF8
 }
 function Get-ElevTaskName([string]$Name) { $script:ElevPrefix + ($Name -replace '[^\w\-]', '_') }
 function Get-ElevDescription($Entry) {
