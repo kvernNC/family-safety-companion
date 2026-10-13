@@ -184,13 +184,21 @@ if (-not $w) { ('{0:s} winget introuvable' -f (Get-Date)) | Add-Content -Path $l
 $script:ElevPrefix     = 'ControleParental-Elevate-'
 $script:ElevConfig     = Join-Path $script:AppDir 'elevate-entries.json'
 $script:ElevScriptPath = Join-Path $script:AppDir 'Elevate-Launch.ps1'
-# Script exécuté par la tâche (compte SYSTEM) : il lance la cible dans la session interactive active, avec le jeton
-# SYSTEM injecté dans cette session (même principe que PsExec -s -i). Peut d'abord tuer une instance non élevée.
+# Script exécuté par la tâche. Deux cas :
+#  - cible .exe (Win32), tâche SYSTEM : lance l'exe EN SYSTEM dans la session interactive (jeton SYSTEM injecté,
+#    même principe que PsExec -s -i) — pour un outil qui a besoin des droits machine (Winhance, etc.) ;
+#  - cible UWP (Armoury Crate SE...), tâche exécutée EN TANT QUE L'UTILISATEUR qui ouvre la session : une app UWP ne
+#    peut pas tourner en SYSTEM, on la lance donc par son AUMID dans la session de l'enfant.
+# Dans les deux cas, option « tuer l'accueil Xbox après le lancement puis monter la garde » pour le remplacer en FSE.
 $script:ElevScript = @'
 param(
-    [Parameter(Mandatory = $true)][string]$Target,
+    [string]$Target = '',      # chemin d'un .exe (mode SYSTEM) ; vide si -Uwp
+    [string]$Uwp = '',         # app UWP : AUMID complet (PFN!AppId) ou nom partiel ; lancée en session enfant
+    [string]$AliveProcess = '',# mode UWP : nom de processus à surveiller ; relancé s'il disparaît (facultatif)
     [string]$Arguments = '',
-    [string]$Kill = '',        # noms de processus à tuer avant de relancer, séparés par des virgules (sans .exe)
+    [string]$Kill = '',        # processus à tuer AVANT de lancer la cible (virgules, sans .exe)
+    [string]$KillAfter = '',   # processus (accueil Xbox) à tuer APRÈS que la cible soit prête, puis à garder morts
+    [int]$ReadyDelay = 6,      # secondes d'attente après le lancement avant de tuer l'accueil Xbox
     [string]$WorkDir = ''
 )
 $ErrorActionPreference = 'Continue'
@@ -256,8 +264,50 @@ public static class CpLaunch {
 }
 "@
 
-if (-not (Test-Path $Target)) { Write-Log "cible introuvable : $Target"; return }
+function Stop-Named([string]$Csv) {
+    $killed = 0
+    foreach ($name in ($Csv -split ',' | ForEach-Object { $_.Trim() -replace '\.exe$', '' } | Where-Object { $_ })) {
+        $procs = @(Get-Process -Name $name -ErrorAction SilentlyContinue)
+        if ($procs.Count -gt 0) { $procs | Stop-Process -Force -ErrorAction SilentlyContinue; $killed += $procs.Count; Write-Log ("tué : {0} ({1})" -f $name, $procs.Count) }
+    }
+    $killed
+}
 
+if ($Kill) { [void](Stop-Named $Kill); Start-Sleep -Seconds 2 }
+
+# ---------------------------------------------------------------- cible UWP (ex. Armoury Crate SE) : session enfant
+if ($Uwp) {
+    function Resolve-Aumid([string]$Spec) {
+        if ($Spec -match '!') { return $Spec }   # déjà un AUMID complet PFN!AppId
+        $pkg = Get-AppxPackage -Name "*$Spec*" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $pkg) { throw "App UWP introuvable : $Spec" }
+        $appId = (Get-AppxPackageManifest -Package $pkg.PackageFullName).Package.Applications.Application.Id | Select-Object -First 1
+        "$($pkg.PackageFamilyName)!$appId"
+    }
+    function Start-Uwp([string]$Aumid) { Start-Process -FilePath "shell:AppsFolder\$Aumid" -ErrorAction Stop }
+    try {
+        $aumid = Resolve-Aumid $Uwp
+        Start-Uwp $aumid
+        Write-Log ("UWP lancée en session enfant : {0}" -f $aumid)
+    } catch { Write-Log ("ÉCHEC du lancement UWP {0} : {1}" -f $Uwp, $_.Exception.Message); return }
+
+    if ($KillAfter) {
+        Start-Sleep -Seconds ([Math]::Max(0, $ReadyDelay))
+        $n = Stop-Named $KillAfter
+        Write-Log ("accueil Xbox tué au lancement ({0}) ; surveillance active" -f $n)
+        while ($true) {
+            Start-Sleep -Seconds 3
+            [void](Stop-Named $KillAfter)
+            if ($AliveProcess -and -not (Get-Process -Name ($AliveProcess -replace '\.exe$', '') -ErrorAction SilentlyContinue)) {
+                try { Start-Uwp $aumid; Write-Log 'cible absente : relancée' } catch {}
+            }
+        }
+    }
+    return
+}
+
+# ---------------------------------------------------------------- cible .exe : lancée EN SYSTEM dans la session
+if (-not $Target -or -not (Test-Path $Target)) { Write-Log "cible .exe introuvable : $Target"; return }
 # Attend qu'une session interactive existe (jusqu'à 60 s) : la tâche peut démarrer avant que le bureau soit prêt.
 $sid = [uint32]::MaxValue
 for ($i = 0; $i -lt 60; $i++) {
@@ -267,18 +317,26 @@ for ($i = 0; $i -lt 60; $i++) {
 }
 if ($sid -eq [uint32]::MaxValue -or $sid -eq 0) { Write-Log 'aucune session interactive : abandon'; return }
 
-if ($Kill) {
-    foreach ($name in ($Kill -split ',' | ForEach-Object { $_.Trim() -replace '\.exe$', '' } | Where-Object { $_ })) {
-        $procs = @(Get-Process -Name $name -ErrorAction SilentlyContinue)
-        if ($procs.Count -gt 0) { $procs | Stop-Process -Force -ErrorAction SilentlyContinue; Write-Log ("tué : {0} ({1} processus)" -f $name, $procs.Count) }
-    }
-    Start-Sleep -Seconds 2
-}
+$pid2 = 0
 try {
     $pid2 = [CpLaunch]::LaunchInSession($sid, $Target, $Arguments, $WorkDir)
     Write-Log ("lancé en SYSTEM (session {0}, PID {1}) : {2} {3}" -f $sid, $pid2, $Target, $Arguments)
 } catch {
     Write-Log ("ÉCHEC du lancement de {0} : {1}" -f $Target, $_.Exception.Message)
+    return
+}
+
+# Remplacement de l'accueil Xbox : attente que la cible soit affichée, on tue l'accueil Xbox, puis garde — tant que
+# la cible tourne, si l'accueil Xbox réapparaît, on le retue. Jamais de course ni de bureau visible.
+if ($KillAfter) {
+    Start-Sleep -Seconds ([Math]::Max(0, $ReadyDelay))
+    $n = Stop-Named $KillAfter
+    Write-Log ("accueil Xbox tué au lancement ({0}) ; surveillance tant que PID {1} tourne" -f $n, $pid2)
+    while ($pid2 -ne 0 -and (Get-Process -Id $pid2 -ErrorAction SilentlyContinue)) {
+        Start-Sleep -Seconds 3
+        [void](Stop-Named $KillAfter)
+    }
+    Write-Log 'cible fermée : fin de la surveillance de l''accueil'
 }
 '@
 
@@ -294,22 +352,46 @@ function Get-ElevTaskName([string]$Name) { $script:ElevPrefix + ($Name -replace 
 function Register-ElevTask($Entry) {
     Install-Self
     Set-Content -Path $script:ElevScriptPath -Value $script:ElevScript -Encoding UTF8
-    $args = @("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$($script:ElevScriptPath)`" -Target `"$($Entry.Target)`"")
-    if ($Entry.Arguments) { $args += " -Arguments `"$($Entry.Arguments -replace '"','\"')`"" }
+    $isUwp = [bool]$Entry.Uwp
+    $args = @("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$($script:ElevScriptPath)`"")
+    if ($isUwp) {
+        $args += " -Uwp `"$($Entry.Uwp)`""
+        if ($Entry.AliveProcess) { $args += " -AliveProcess `"$($Entry.AliveProcess)`"" }
+    } else {
+        $args += " -Target `"$($Entry.Target)`""
+        if ($Entry.Arguments) { $args += " -Arguments `"$($Entry.Arguments -replace '"','\"')`"" }
+        if ($Entry.WorkDir)   { $args += " -WorkDir `"$($Entry.WorkDir)`"" }
+    }
     if ($Entry.Kill)      { $args += " -Kill `"$($Entry.Kill)`"" }
-    if ($Entry.WorkDir)   { $args += " -WorkDir `"$($Entry.WorkDir)`"" }
+    if ($Entry.KillAfter) { $args += " -KillAfter `"$($Entry.KillAfter)`" -ReadyDelay $([int]$Entry.ReadyDelay)" }
     $a  = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ($args -join '')
     $tr = New-ScheduledTaskTrigger -AtLogOn
-    $p  = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-    $s  = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
+    if ($isUwp) {
+        # UWP : impossible en SYSTEM. On exécute en tant que l'utilisateur qui ouvre la session (groupe Utilisateurs),
+        # sans élévation. La garde anti-Xbox tourne jusqu'à la fermeture de session.
+        $p = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited
+    } else {
+        $p = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    }
+    $s = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero)
     Register-ScheduledTask -TaskName (Get-ElevTaskName $Entry.Name) -Action $a -Trigger $tr -Principal $p -Settings $s -Force | Out-Null
 }
-function Add-ElevEntry([string]$Name, [string]$Target, [string]$Arguments = '', [string]$Kill = '', [string]$WorkDir = '') {
-    if (-not $Name)   { $Name = [IO.Path]::GetFileNameWithoutExtension($Target) }
-    if (-not $Target) { throw 'Chemin du programme manquant.' }
-    if (-not (Test-Path $Target)) { throw "Programme introuvable : $Target" }
-    $entry = [ordered]@{ Name = $Name; Target = $Target; Arguments = $Arguments; Kill = $Kill; WorkDir = $WorkDir }
-    $entries = @(Get-ElevEntries | Where-Object { $_.Name -ne $Name }) + $entry
+function Add-ElevEntry([hashtable]$Spec) {
+    $isUwp = [bool]$Spec.Uwp
+    $name = $Spec.Name
+    if (-not $name) { $name = if ($isUwp) { ($Spec.Uwp -split '!')[0] -replace '.*\.', '' } else { [IO.Path]::GetFileNameWithoutExtension($Spec.Target) } }
+    if (-not $name) { throw 'Nom manquant.' }
+    if ($isUwp) {
+        if (-not $Spec.Uwp) { throw 'Nom ou AUMID de l''app UWP manquant.' }
+    } else {
+        if (-not $Spec.Target) { throw 'Chemin du programme manquant.' }
+        if (-not (Test-Path $Spec.Target)) { throw "Programme introuvable : $($Spec.Target)" }
+    }
+    $delay = 6; if ($Spec.ReadyDelay) { $delay = [int]$Spec.ReadyDelay }
+    $entry = [ordered]@{ Name = $name; Uwp = "$($Spec.Uwp)"; Target = "$($Spec.Target)"; Arguments = "$($Spec.Arguments)"
+                         AliveProcess = "$($Spec.AliveProcess)"; Kill = "$($Spec.Kill)"; KillAfter = "$($Spec.KillAfter)"
+                         ReadyDelay = $delay; WorkDir = "$($Spec.WorkDir)" }
+    $entries = @(Get-ElevEntries | Where-Object { $_.Name -ne $name }) + $entry
     Save-ElevEntries $entries
     Register-ElevTask $entry
     $entry
@@ -420,7 +502,9 @@ function Get-DiagnosticReport {
         foreach ($e in $entries) {
             $task = Get-ScheduledTask -TaskName (Get-ElevTaskName $e.Name) -ErrorAction SilentlyContinue
             $st = if ($task) { "tâche $($task.State)" } else { '! tâche absente' }
-            $r.Add(('  {0} -> {1} {2} [{3}]' -f $e.Name, $e.Target, $e.Arguments, $st))
+            $what = if ($e.Uwp) { "UWP $($e.Uwp)" } else { "$($e.Target) $($e.Arguments)" }
+            $ka = if ($e.KillAfter) { " ; tue l'accueil : $($e.KillAfter)" } else { '' }
+            $r.Add(('  {0} -> {1}{2} [{3}]' -f $e.Name, $what, $ka, $st))
         }
         $log = Join-Path $script:AppDir 'elevate-launch.log'
         if (Test-Path $log) { $r.Add('Dernières lignes de elevate-launch.log :'); Get-Content $log -Tail 8 -Encoding UTF8 | ForEach-Object { $r.Add("  $_") } }
@@ -725,7 +809,7 @@ if ($script:CliMode) {
         Write-Host ("Terminé : {0} ajouté(s), {1} déjà envoyé(s), {2} erreur(s)." -f $res.Ok, $res.Skipped, $res.Failed.Count)
         return
     }
-    if ($ElevList)   { foreach ($e in @(Get-ElevEntries)) { $task = Get-ScheduledTask -TaskName (Get-ElevTaskName $e.Name) -ErrorAction SilentlyContinue; Write-Host ('{0,-20} {1} {2}  [{3}]' -f $e.Name, $e.Target, $e.Arguments, $(if ($task) { $task.State } else { 'tâche absente' })) }; return }
+    if ($ElevList)   { foreach ($e in @(Get-ElevEntries)) { $task = Get-ScheduledTask -TaskName (Get-ElevTaskName $e.Name) -ErrorAction SilentlyContinue; $what = if ($e.Uwp) { "UWP $($e.Uwp)" } else { "$($e.Target) $($e.Arguments)" }; Write-Host ('{0,-20} {1}  [{2}]' -f $e.Name, $what, $(if ($task) { $task.State } else { 'tâche absente' })) }; return }
     if ($ElevTest)   { Invoke-ElevNow $ElevTest; Write-Host "Lancé : $ElevTest (voir elevate-launch.log)."; return }
     if ($SvcElevate) { Write-Host (Set-ServiceElevated $SvcElevate); return }
     if (($Apply -or $Revert) -and -not $Quiet) { Backup-State }
@@ -877,7 +961,7 @@ $script:ElevXaml = @'
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="120"/>
     </Grid.RowDefinitions>
-    <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="#555555" Text="Lance un programme EN SYSTEM dans la session de l'enfant à chaque ouverture de session, et/ou élève un service. C'est toi (admin) qui choisis les cibles ici ; elles sont figées dans des tâches planifiées SYSTEM que l'enfant ne peut ni voir ni modifier. À tester : certains programmes se comportent mal lancés en SYSTEM."/>
+    <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="#555555" Text="Lance un programme à l'ouverture de session de l'enfant (et peut remplacer l'accueil Xbox), et/ou élève un service. C'est toi (admin) qui choisis les cibles ici ; elles sont figées dans des tâches planifiées que l'enfant ne peut ni voir ni modifier."/>
     <TabControl Grid.Row="1" Margin="0,10,0,0">
       <TabItem Header="Programmes au démarrage de session">
         <Grid Margin="10">
@@ -897,17 +981,30 @@ $script:ElevXaml = @'
             <TextBlock Text="Ajouter / modifier un programme" FontWeight="SemiBold" FontSize="14"/>
             <TextBlock Text="Nom (repère) :" Margin="0,8,0,2"/>
             <TextBox x:Name="ElevName"/>
-            <TextBlock Text="Programme (.exe) :" Margin="0,8,0,2"/>
+            <TextBlock Text="Type de cible :" Margin="0,8,0,2"/>
+            <ComboBox x:Name="ElevType" SelectedIndex="0">
+              <ComboBoxItem Content="App Windows / UWP (Armoury Crate SE) — lancée en session enfant"/>
+              <ComboBoxItem Content="Programme .exe (Winhance, Win32) — lancé en SYSTEM"/>
+            </ComboBox>
+            <TextBlock x:Name="ElevTargetLabel" Text="Nom de l'app UWP ou AUMID (PFN!AppId) :" Margin="0,8,0,2" TextWrapping="Wrap"/>
             <StackPanel Orientation="Horizontal">
               <TextBox x:Name="ElevTarget" Width="360" Margin="0,0,8,0"/>
               <Button x:Name="BtnElevBrowse" Content="Parcourir..." Padding="10,3"/>
             </StackPanel>
-            <TextBlock Text="Arguments (facultatif) :" Margin="0,8,0,2"/>
+            <TextBlock x:Name="ElevArgsLabel" Text="Arguments (.exe seulement, facultatif) :" Margin="0,8,0,2"/>
             <TextBox x:Name="ElevArgs"/>
-            <TextBlock Text="Processus à tuer d'abord (noms séparés par des virgules, sans .exe ; facultatif) :" Margin="0,8,0,2" TextWrapping="Wrap"/>
+            <TextBlock Text="Remplacer l'accueil Xbox : processus à tuer après le lancement (virgules) :" Margin="0,8,0,2" TextWrapping="Wrap"/>
+            <TextBox x:Name="ElevKillAfter" Text="XboxPcApp,XboxApp,GamingApp"/>
+            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+              <TextBlock Text="Délai avant de tuer (s) : " VerticalAlignment="Center"/>
+              <TextBox x:Name="ElevDelay" Width="50" Text="6" Margin="0,0,16,0"/>
+              <TextBlock Text="Processus à surveiller (UWP, facultatif) : " VerticalAlignment="Center"/>
+              <TextBox x:Name="ElevAlive" Width="160"/>
+            </StackPanel>
+            <TextBlock Text="Processus à tuer AVANT (facultatif) :" Margin="0,8,0,2"/>
             <TextBox x:Name="ElevKill"/>
-            <TextBlock TextWrapping="Wrap" Foreground="#666666" FontSize="11" Margin="0,4,0,0" Text="Exemple Armoury Crate : laisse Arguments vide et mets dans « tuer d'abord » les noms des processus Armoury Crate (par ex. ArmouryCrate.UserSessionHelper, ArmouryCrateSE). La tâche les relancera en SYSTEM à l'ouverture de session."/>
-            <Button x:Name="BtnElevSave" Content="Enregistrer (crée/replace la tâche)" Padding="12,5" FontWeight="SemiBold" Margin="0,12,0,0" HorizontalAlignment="Left"/>
+            <TextBlock TextWrapping="Wrap" Foreground="#666666" FontSize="11" Margin="0,6,0,0" Text="Armoury Crate (mode Xbox) : type UWP, nom « ArmouryCrate » (ou son AUMID), laisse « tuer après » sur les processus d'accueil Xbox. Vérifie les noms exacts dans le Gestionnaire des tâches. La puissance se règle à part, via l'onglet Services."/>
+            <Button x:Name="BtnElevSave" Content="Enregistrer (crée/remplace la tâche)" Padding="12,5" FontWeight="SemiBold" Margin="0,12,0,0" HorizontalAlignment="Left"/>
           </StackPanel>
         </Grid>
       </TabItem>
@@ -936,8 +1033,9 @@ function Update-ElevList {
     foreach ($e in @(Get-ElevEntries)) {
         $task = Get-ScheduledTask -TaskName (Get-ElevTaskName $e.Name) -ErrorAction SilentlyContinue
         $mark = if ($task) { '' } else { '  (tâche absente)' }
+        $what = if ($e.Uwp) { "UWP $($e.Uwp)" } else { $e.Target }
         $it = New-Object System.Windows.Controls.ListBoxItem
-        $it.Content = "$($e.Name) -> $($e.Target)$mark"
+        $it.Content = "$($e.Name) -> $what$mark"
         $it.Tag = $e.Name
         [void]$script:Elev.List.Items.Add($it)
     }
@@ -952,15 +1050,32 @@ function Show-ElevateWindow {
     $w = [System.Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader ([xml]$script:ElevXaml)))
     $w.Owner = $window
     $c = @{ Window = $w }
-    foreach ($n in 'ElevList', 'BtnElevTest', 'BtnElevDel', 'ElevName', 'ElevTarget', 'BtnElevBrowse', 'ElevArgs', 'ElevKill', 'BtnElevSave', 'SvcList', 'BtnSvcReload', 'BtnSvcElevate', 'ElevOut') { $c[$n] = $w.FindName($n) }
+    foreach ($n in 'ElevList', 'BtnElevTest', 'BtnElevDel', 'ElevName', 'ElevType', 'ElevTargetLabel', 'ElevTarget', 'BtnElevBrowse', 'ElevArgs', 'ElevArgsLabel', 'ElevKillAfter', 'ElevDelay', 'ElevAlive', 'ElevKill', 'BtnElevSave', 'SvcList', 'BtnSvcReload', 'BtnSvcElevate', 'ElevOut') { $c[$n] = $w.FindName($n) }
     $c.List = $c.ElevList; $c.Svc = $c.SvcList; $c.Out = $c.ElevOut
     $script:Elev = $c
 
+    # Bascule UWP (index 0) / .exe (index 1) : adapte les libellés et le bouton Parcourir.
+    $c.ElevType.Add_SelectionChanged({
+        $isUwp = ($script:Elev.ElevType.SelectedIndex -eq 0)
+        $script:Elev.ElevTargetLabel.Text = if ($isUwp) { "Nom de l'app UWP ou AUMID (PFN!AppId) :" } else { 'Programme (.exe) :' }
+        $script:Elev.BtnElevBrowse.IsEnabled = -not $isUwp
+        $script:Elev.ElevArgs.IsEnabled = -not $isUwp
+        $script:Elev.ElevAlive.IsEnabled = $isUwp
+    })
     $c.ElevList.Add_SelectionChanged({
         $sel = $script:Elev.ElevList.SelectedItem
         if (-not $sel) { return }
         $e = @(Get-ElevEntries | Where-Object { $_.Name -eq $sel.Tag })[0]
-        if ($e) { $script:Elev.ElevName.Text = $e.Name; $script:Elev.ElevTarget.Text = $e.Target; $script:Elev.ElevArgs.Text = $e.Arguments; $script:Elev.ElevKill.Text = $e.Kill }
+        if ($e) {
+            $script:Elev.ElevName.Text = $e.Name
+            $script:Elev.ElevType.SelectedIndex = if ($e.Uwp) { 0 } else { 1 }
+            $script:Elev.ElevTarget.Text = if ($e.Uwp) { $e.Uwp } else { $e.Target }
+            $script:Elev.ElevArgs.Text = "$($e.Arguments)"
+            $script:Elev.ElevKillAfter.Text = "$($e.KillAfter)"
+            $script:Elev.ElevDelay.Text = "$($e.ReadyDelay)"
+            $script:Elev.ElevAlive.Text = "$($e.AliveProcess)"
+            $script:Elev.ElevKill.Text = "$($e.Kill)"
+        }
     })
     $c.BtnElevBrowse.Add_Click({
         $dlg = New-Object Microsoft.Win32.OpenFileDialog
@@ -972,8 +1087,18 @@ function Show-ElevateWindow {
     })
     $c.BtnElevSave.Add_Click({
         try {
-            $e = Add-ElevEntry -Name $script:Elev.ElevName.Text -Target $script:Elev.ElevTarget.Text -Arguments $script:Elev.ElevArgs.Text -Kill $script:Elev.ElevKill.Text
-            Write-ElevOut "Enregistré : $($e.Name) -> $($e.Target). Tâche créée (SYSTEM, à l'ouverture de session)."
+            $isUwp = ($script:Elev.ElevType.SelectedIndex -eq 0)
+            $spec = @{
+                Name = $script:Elev.ElevName.Text
+                KillAfter = $script:Elev.ElevKillAfter.Text
+                ReadyDelay = $script:Elev.ElevDelay.Text
+                Kill = $script:Elev.ElevKill.Text
+            }
+            if ($isUwp) { $spec.Uwp = $script:Elev.ElevTarget.Text; $spec.AliveProcess = $script:Elev.ElevAlive.Text }
+            else        { $spec.Target = $script:Elev.ElevTarget.Text; $spec.Arguments = $script:Elev.ElevArgs.Text }
+            $e = Add-ElevEntry $spec
+            $how = if ($e.Uwp) { "UWP, session enfant" } else { "SYSTEM" }
+            Write-ElevOut "Enregistré : $($e.Name) ($how). Tâche créée, déclenchée à l'ouverture de session."
             Update-ElevList
         } catch { Write-UiError 'Elev enregistrer' $_; Write-ElevOut "Erreur : $($_.Exception.Message)" }
     })
