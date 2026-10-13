@@ -33,6 +33,13 @@ La fenêtre Family Safety, onglet Sites web : réglages du filtre, ajout de site
 - **Windows** : SmartScreen en mode « Bloquer », widgets et suggestions web désactivés ; en option : applications du
   Store uniquement, stockage USB désactivé, élévation refusée aux comptes standard, historique d'activités et
   localisation désactivés, maintenance hebdomadaire (fichiers temporaires, `winget upgrade`).
+- **Optimisation (optionnel)** : désactiver Copilot et l'IA de Windows, alléger la télémétrie et les pubs **sans
+  casser Family Safety**, Game DVR, apps en arrière-plan, indexation Search, démarrage de SCSKiller. Voir plus bas.
+- **Groupes du compte enfant** : autorisations précises sans droits administrateur, choisies dans une liste fermée
+  et sans risque (compteur FPS des jeux, compteurs de performance). Voir plus bas.
+- **Démarrage élevé** : menu pour lancer un programme à l'ouverture de session de l'enfant (app UWP ou `.exe` dans
+  sa session, ou `.exe` en SYSTEM) et **remplacer l'accueil Xbox (FSE) par ce qu'on veut** : Armoury Crate SE,
+  Steam Big Picture, Playnite… ; (re)démarrage d'un service en LocalSystem (voir plus bas).
 - Réactivation automatique après un délai quand tu lèves une protection (tâche planifiée SYSTEM),
   sauvegarde du registre avant chaque modification, diagnostic (comptes, navigateurs ou VPN en trop, démarrage).
 
@@ -55,6 +62,9 @@ La fenêtre Family Safety, onglet Sites web : réglages du filtre, ajout de site
 | Tentatives bloquées, historique web et recherches | Format des réponses non confirmé |
 | Blocage d'applications, blocage d'appareil, limites de temps d'écran | Non testé en réel (gestion du fuseau horaire non confirmée) |
 | Protections locales | Code vérifié, pas encore éprouvé sur un PC d'enfant : teste chacune avant de t'y fier |
+| Groupes du compte enfant | Lecture des comptes et des groupes vérifiée sur ROG Ally ; effet sur le compteur FPS à confirmer |
+| Optimisation de l'OS (optionnel) | Catalogue vérifié sur ROG Ally (32 réglages chargés) ; teste chaque interrupteur avant de t'y fier |
+| Démarrage élevé (UWP ou SYSTEM), remplacement de l'accueil Xbox, élévation de service | Non testé sur un appareil réel : vérifie `elevate-launch.log` et l'écran de l'enfant |
 
 ## Prérequis
 - Windows 10 ou 11 (Home compris), Windows PowerShell 5.1, Microsoft Edge.
@@ -76,6 +86,113 @@ Le script demande l'élévation (UAC). En ligne de commande (administrateur) :
 .\ControleParental.ps1 -Revert edge-downloads                   # lève une protection
 .\ControleParental.ps1 -Diagnostic                              # rapport de diagnostic
 .\ControleParental.ps1 -FsImport liste.txt -FsChild Prenom      # ajout en masse de sites autorisés (-FsBlock pour bloquer)
+```
+
+## Démarrage élevé — menu « Démarrage élevé »
+Lance un programme à chaque ouverture de session de l'enfant et peut lui faire **remplacer l'accueil Xbox plein
+écran** (Full Screen Experience). **C'est toi, admin, qui choisis les cibles** dans la console (protégée par
+l'UAC) ; chaque cible est **figée dans une tâche planifiée** que l'enfant ne peut ni voir ni modifier. Il déclenche
+l'ouverture de session, mais ne choisit jamais ce qui est lancé.
+
+### Trois types de cible
+- **App Windows / UWP** (ex. **Armoury Crate SE**) : une app UWP ne peut pas tourner en SYSTEM ; elle est donc
+  lancée **dans la session de l'enfant, en tant que l'enfant**, par son AUMID (`PFN!AppId`, ou un nom partiel résolu).
+- **Programme `.exe` en session enfant** (ex. **Steam Big Picture**, **Playnite**) : lancé normalement, sous le
+  compte de l'enfant. C'est le bon choix pour un launcher, qui a besoin du profil de l'enfant (compte Steam,
+  bibliothèque, Family View) ; lancé en SYSTEM, il ne les verrait pas.
+- **Programme `.exe` en SYSTEM** (ex. **Winhanced**) : lancé **en SYSTEM dans la session interactive** de l'enfant
+  (jeton SYSTEM injecté, comme `PsExec -s -i`), pour un outil qui a réellement besoin des droits machine.
+
+### Remplacer l'accueil Xbox (FSE)
+Renseigne « processus à tuer après le lancement » (par défaut `XboxPcApp,XboxPcAppFT`, relevés sur ROG Ally sous
+Windows 11 25H2). La tâche attend quelques secondes que ta cible soit affichée, **tue l'accueil Xbox**, puis **monte
+la garde** : tant que la cible tourne, si l'accueil Xbox réapparaît, il est retué. Ta cible prend la place de
+l'accueil plein écran, sans course au démarrage et **sans jamais montrer le bureau Windows**. En option, la cible
+est relancée si elle disparaît (« processus à surveiller »).
+
+### Choisir ce qui remplace l'accueil Xbox
+Deux préréglages remplissent le formulaire ; vérifie, puis Enregistrer et « Tester maintenant » :
+
+| Préréglage | Type | Cible | Processus à surveiller |
+|---|---|---|---|
+| Armoury Crate SE | App UWP | `ArmouryCrateSE` (AUMID sur ROG Ally RC71L : `B9ECED6F.ArmouryCrateSE_qmba6cd70vzyy!App`) | `ArmouryCrateSE` |
+| Steam Big Picture | `.exe` en session enfant | `steam.exe` (trouvé dans le registre), arguments `-gamepadui` | `steam` |
+
+Pour un autre launcher (Playnite en plein écran, par exemple), choisis « `.exe` en session enfant », indique son
+exécutable et ses arguments, et garde « tuer après » sur `XboxPcApp,XboxPcAppFT`. Avec Steam, active **Family
+View** (PIN, jeux autorisés) pour limiter Isaac aux jeux choisis.
+
+Journal : `C:\ProgramData\ControleParental\elevate-launch.log` ; le diagnostic affiche les entrées configurées et
+l'état des services ASUS.
+
+```powershell
+.\ControleParental.ps1 -ElevList                           # liste les cibles configurées
+.\ControleParental.ps1 -ElevTest ArmouryCrateSE            # lance maintenant l'entrée nommée ainsi
+.\ControleParental.ps1 -SvcElevate ArmouryCrateSEService   # LocalSystem + démarrage auto + redémarrage
+```
+
+L'onglet **Services** passe un service en LocalSystem, démarrage automatique, puis le redémarre. Utile pour un
+service arrêté ou mal configuré ; sur ROG Ally, les services ASUS et Armoury tournent déjà en LocalSystem.
+
+> ⚠️ Lancer un `.exe` en SYSTEM lui donne les droits maximaux de la machine ; n'ajoute que des programmes de
+> confiance. Ce menu ne crée aucun champ où l'enfant fournirait lui-même une cible. Vérifie les noms de processus
+> dans le Gestionnaire des tâches de ton appareil : ils varient selon les versions de Windows et d'Armoury Crate.
+
+## ROG Ally : ce que nous avons appris
+Analyse du journal `C:\ProgramData\ASUS\ARMOURY CRATE Service\ArmouryCrate.Service_<date>.log` (Armoury Crate SE
+2.2.17, octobre 2026) :
+
+- **La puissance n'est pas un problème de droits.** Depuis un compte standard, les changements de mode arrivent au
+  service ASUS (compte SYSTEM), qui les applique : le firmware répond `SetThermalPolicy, Result=1`.
+- **Le retour au mode maximal vient d'Armoury Crate lui-même.** Il garde un mode « sur secteur » et un mode « sur
+  batterie ». Sa logique de profils par application (`DoSetAppProfile`, `HandleOtherPluginRequest` dans le
+  journal) se déclenche quand l'application au premier plan change, par exemple sur un Alt+Tab en jeu. Elle range
+  alors ton choix dans le mode « secteur » et remet le mode « batterie » au maximum. Sur batterie, le maximum gagne.
+  À régler dans Armoury Crate : profils par jeu, ou mode sur batterie.
+- **Compteur FPS absent sur le compte enfant** : voir « Groupes du compte enfant » ci-dessous.
+## Optimisation de l'OS (optionnel) — catégorie « Optimisation (optionnel) »
+Réglages d'allègement inspirés de [Chris Titus Tech WinUtil](https://github.com/ChrisTitusTech/winutil), mais
+adaptés à un ROG Ally sous contrôle parental, en interrupteurs réversibles (hors « Tout activer »).
+
+| Interrupteur | Effet |
+|---|---|
+| Désactiver Copilot et l'IA de Windows | Coupe Copilot, Recall et « Click to Do » (stratégies). Sans effet sur les jeux. |
+| Télémétrie allégée (sûre) + pubs et suggestions | ID de publicité, « expériences personnalisées », fonctionnalités grand public, Spotlight, suggestions du menu Démarrer. |
+| Edge : pas d'exécution en arrière-plan | Edge ne tourne plus en fond et ne précharge plus au démarrage. |
+| Désactiver l'enregistrement en arrière-plan (Game DVR) | Coupe la capture continue en **gardant** l'overlay Game Bar et les FPS. |
+| Empêcher les apps de tourner en arrière-plan | Apps du Store en fond coupées (batterie/RAM) ; les jeux Steam ne sont pas concernés. |
+| Désactiver l'indexation Windows Search | Arrête le service d'indexation ; la recherche d'apps dans Démarrer marche toujours. |
+| Ne pas lancer SCSKiller au démarrage | Retire sa valeur de démarrage des clés Run (machine + ton compte), sauvegardée pour restauration. |
+
+**Garde-fous (jamais touchés) :** `DiagTrack` et `CDPSvc`, le niveau de télémétrie (pas forcé à 0), Game Bar, et
+le plan d'alimentation Windows (géré par Armoury Crate). C'est la différence avec un durcissement « adulte » qui
+casserait les rapports d'activité de Family Safety.
+
+**Antivirus :** l'outil **ne touche pas à Windows Defender**. Un script qui modifie Defender (exclusions,
+`Set-MpPreference`…) est lui-même détecté par Defender comme `Trojan:PowerShell/Killav` et tout le script est
+bloqué par AMSI. Si tu veux exclure tes dossiers de jeux Steam pour gagner en perf, fais-le à la main dans
+**Sécurité Windows → Protection contre les virus → Exclusions**, en gardant la protection active.
+
+## Groupes du compte enfant — bouton « Groupes du compte enfant »
+Certaines fonctions des jeux demandent une autorisation Windows qu'un compte standard n'a pas, sans pour autant
+justifier des droits administrateur. Exemple : sur ROG Ally, Armoury Crate n'affiche pas les FPS sur le compte
+de l'enfant, parce que compter les images d'un jeu passe par le traçage d'événements Windows (ETW).
+
+La fenêtre propose une **liste fermée** de groupes locaux, avec un interrupteur par groupe :
+
+| Interrupteur | Groupe Windows | Effet |
+|---|---|---|
+| Compteur FPS dans les jeux | Utilisateurs du journal de performances (`S-1-5-32-559`) | Overlays FPS (Armoury Crate, Xbox Game Bar, PresentMon) |
+| Compteurs de performance | Utilisateurs de l'Analyseur de performances (`S-1-5-32-558`) | Lecture des compteurs CPU, GPU, mémoire |
+
+Effet à la **prochaine ouverture de session** de l'enfant. Volontairement absents : Administrateurs, Opérateurs de
+configuration réseau (pourrait changer le DNS et contourner le filtre), Opérateurs de sauvegarde (lecture de tout
+fichier, chemin connu vers l'admin), Propriétaires d'appareil, Hyper-V et accès à distance. Seuls les comptes
+standard actifs sont proposés.
+
+```powershell
+.\ControleParental.ps1 -GroupGrant perf-log -Child isaac    # accorde (perf-log ou perf-mon)
+.\ControleParental.ps1 -GroupRevoke perf-log -Child isaac   # retire
 ```
 
 ## Liste blanche
