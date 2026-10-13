@@ -1156,6 +1156,34 @@ function Set-ElevForm([string]$Name, [int]$Type, [string]$Target, [string]$Argum
     $script:Elev.ElevKill.Text = ''
     Update-ElevTypeUi
 }
+# Enregistre le formulaire (entrée + tâche planifiée). -ReplaceHome : un seul remplaçant de l'accueil Xbox à la
+# fois, les autres entrées qui tuent l'accueil Xbox sont retirées.
+function Save-ElevForm([switch]$ReplaceHome) {
+    try {
+        $type = $script:Elev.ElevType.SelectedIndex
+        $spec = @{
+            Name = $script:Elev.ElevName.Text
+            KillAfter = $script:Elev.ElevKillAfter.Text
+            ReadyDelay = $script:Elev.ElevDelay.Text
+            Kill = $script:Elev.ElevKill.Text
+        }
+        if ($type -eq 0) { $spec.Uwp = $script:Elev.ElevTarget.Text }
+        else             { $spec.Target = $script:Elev.ElevTarget.Text; $spec.Arguments = $script:Elev.ElevArgs.Text; $spec.AsUser = ($type -eq 1) }
+        if ($type -ne 2) { $spec.AliveProcess = $script:Elev.ElevAlive.Text }
+        $e = Add-ElevEntry $spec
+        if ($ReplaceHome) {
+            foreach ($o in @(Get-ElevEntries | Where-Object { $_.Name -ne $e.Name -and $_.KillAfter })) {
+                Remove-ElevEntry $o.Name
+                Write-ElevOut "Retiré : $($o.Name) (un seul remplaçant de l'accueil Xbox à la fois)."
+            }
+        }
+        $how = if ($e.Uwp) { 'UWP, session enfant' } elseif ($e.AsUser) { 'session enfant' } else { 'SYSTEM' }
+        $what = if ($e.KillAfter) { "il remplacera l'accueil Xbox à chaque ouverture de session" } else { "il sera lancé à chaque ouverture de session" }
+        Write-ElevOut "Enregistré : $($e.Name) ($how) ; $what. « Tester maintenant » pour essayer tout de suite."
+        Update-ElevList
+        foreach ($it in $script:Elev.ElevList.Items) { if ($it.Tag -eq $e.Name) { $script:Elev.ElevList.SelectedItem = $it } }
+    } catch { Write-UiError 'Elev enregistrer' $_; Write-ElevOut "Erreur : $($_.Exception.Message)" }
+}
 function Get-SteamExe {
     foreach ($k in 'HKLM:\SOFTWARE\WOW6432Node\Valve\Steam', 'HKLM:\SOFTWARE\Valve\Steam') {
         $dir = (Get-ItemProperty $k -Name InstallPath -ErrorAction SilentlyContinue).InstallPath
@@ -1179,13 +1207,13 @@ function Show-ElevateWindow {
     $c.ElevType.Add_SelectionChanged({ Update-ElevTypeUi })
     $c.BtnPresetArmoury.Add_Click({
         Set-ElevForm -Name 'ArmouryCrateSE' -Type 0 -Target 'ArmouryCrateSE' -Arguments '' -Alive 'ArmouryCrateSE'
-        Write-ElevOut "Préréglage Armoury Crate SE chargé : vérifie puis Enregistrer."
+        Save-ElevForm -ReplaceHome
     })
     $c.BtnPresetSteam.Add_Click({
         $steam = Get-SteamExe
-        if (-not $steam) { Write-ElevOut 'Steam introuvable : indique le chemin de steam.exe avec Parcourir.'; $steam = '' }
+        if (-not $steam) { Write-ElevOut 'Steam introuvable : choisis le type « .exe en session enfant », indique steam.exe avec Parcourir, puis Enregistrer.'; return }
         Set-ElevForm -Name 'SteamBigPicture' -Type 1 -Target $steam -Arguments '-gamepadui' -Alive 'steam'
-        Write-ElevOut "Préréglage Steam Big Picture chargé : vérifie puis Enregistrer."
+        Save-ElevForm -ReplaceHome
     })
     $c.ElevList.Add_SelectionChanged({
         $sel = $script:Elev.ElevList.SelectedItem
@@ -1210,24 +1238,7 @@ function Show-ElevateWindow {
             if (-not $script:Elev.ElevName.Text) { $script:Elev.ElevName.Text = [IO.Path]::GetFileNameWithoutExtension($dlg.FileName) }
         }
     })
-    $c.BtnElevSave.Add_Click({
-        try {
-            $type = $script:Elev.ElevType.SelectedIndex
-            $spec = @{
-                Name = $script:Elev.ElevName.Text
-                KillAfter = $script:Elev.ElevKillAfter.Text
-                ReadyDelay = $script:Elev.ElevDelay.Text
-                Kill = $script:Elev.ElevKill.Text
-            }
-            if ($type -eq 0) { $spec.Uwp = $script:Elev.ElevTarget.Text }
-            else             { $spec.Target = $script:Elev.ElevTarget.Text; $spec.Arguments = $script:Elev.ElevArgs.Text; $spec.AsUser = ($type -eq 1) }
-            if ($type -ne 2) { $spec.AliveProcess = $script:Elev.ElevAlive.Text }
-            $e = Add-ElevEntry $spec
-            $how = if ($e.Uwp) { 'UWP, session enfant' } elseif ($e.AsUser) { 'session enfant' } else { 'SYSTEM' }
-            Write-ElevOut "Enregistré : $($e.Name) ($how). Tâche créée, déclenchée à l'ouverture de session."
-            Update-ElevList
-        } catch { Write-UiError 'Elev enregistrer' $_; Write-ElevOut "Erreur : $($_.Exception.Message)" }
-    })
+    $c.BtnElevSave.Add_Click({ Save-ElevForm })
     $c.BtnElevDel.Add_Click({
         $sel = $script:Elev.ElevList.SelectedItem
         if (-not $sel) { Write-ElevOut 'Sélectionne un programme à supprimer.'; return }
